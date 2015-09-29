@@ -29,7 +29,6 @@ class StorletMiddleware(object):
         Using split_path we can obtain the account id.
         '''
         _, account, container, swift_object = split_path(req.path, 0, 4, True)
-
         '''
         We only add the storlets headers if the call goes to the swift object.
         '''
@@ -37,12 +36,14 @@ class StorletMiddleware(object):
             return self.app
         self.app.logger.info('Storlet middleware: Account INFO: Start')
 
+        if not self.valid_container(container):
+            return self.app
         #check if is a valid request
         if not self.valid_request(req):
             # We only want to process PUT, POST and GET requests
             # Also we ignore the calls that goes to the storlet and dependency container
             return self.app
-            
+
         '''
         This is the core part of the middleware. Here we should consult to a
         Memcached/DB about the user. If this user has some storlet activated,
@@ -59,10 +60,13 @@ class StorletMiddleware(object):
         self.app.logger.info('Storlet middleware: Valid req')
         if (req.method == 'PUT' or req.method == 'GET' or req.method == 'POST'):
             #Also we need to discard the copy calls.
-            if container != "storlet" and container != "dependency":
-                if not "HTTP_X_COPY_FROM" in req.environ.keys():
-                    self.app.logger.info('Storlet middleware: Valid req: OK')
-                    return True
+            if not "HTTP_X_COPY_FROM" in req.environ.keys():
+                self.app.logger.info('Storlet middleware: Valid req: OK')
+                return True
+        return False
+    def valid_container(self, container):
+        if container != "storlet" and container != "dependency":
+            return True
         return False
 
 
