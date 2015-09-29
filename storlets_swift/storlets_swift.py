@@ -14,7 +14,7 @@ class StorletMiddleware(object):
 
         '''
         self.user_filter is a hashmap that stores the relation between user
-        and storlet.
+        and storlet and also the parameters of the storlet.
         This hashmap should be changed it for Memcached system.
         '''
         self.user_filter = {}
@@ -40,7 +40,9 @@ class StorletMiddleware(object):
         #check if is a valid request
         if not self.valid_request(req):
             # We only want to process PUT, POST and GET requests
+            # Also we ignore the calls that goes to the storlet and dependency container
             return self.app
+            
         '''
         This is the core part of the middleware. Here we should consult to a
         Memcached/DB about the user. If this user has some storlet activated,
@@ -57,10 +59,10 @@ class StorletMiddleware(object):
         self.app.logger.info('Storlet middleware: Valid req')
         if (req.method == 'PUT' or req.method == 'GET' or req.method == 'POST'):
             #Also we need to discard the copy calls.
-            if not "HTTP_X_COPY_FROM" in req.environ.keys():
-                self.app.logger.info('Storlet middleware: Valid req: OK')
-                return True
-            return False
+            if container != "storlet" and container != "dependency":
+                if not "HTTP_X_COPY_FROM" in req.environ.keys():
+                    self.app.logger.info('Storlet middleware: Valid req: OK')
+                    return True
         return False
 
 
