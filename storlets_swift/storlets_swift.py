@@ -31,8 +31,6 @@ class StorletMiddleware(object):
             version, account, container, obj = req.split_path(2, 4, rest_with_last=True)
 
             if not self.valid_request(req, container):
-                # We only want to process PUT, POST and GET requests
-                # Also we ignore the calls that goes to the storlet, dependency and docker_image container
                 return self.app
 
             '''
@@ -43,19 +41,59 @@ class StorletMiddleware(object):
             '''
             storlet_list = self.redis_connection.lrange(str(account), 0, -1)
 
-            self.app.logger.info('Storlet middleware: storlet_info: '+str(storlet_list))
-            for storlet in storlet_list:
-                    params = self.redis_connection.hgetall(str(account)+":"+str(storlet))
-                self.app.logger.info('Storlet middleware: params: '+str(params))
-                req.headers["X-Run-Storlet"]=storlet
-                    self.app.logger.info('Storlet middleware: header: '+str(req.headers))
+            if not storlet_list:
+                None
+
+            storlet_gateway = csg.ControllerGatewayStorlet(self.hconf, self.logger, self.app, account,
+                                                            container, obj)
+
+            account_meta = storlet_gateway.getAccountInfo()
+            out_fd = None
+            toProxy = 0
+            toObject = 0
+
+            # Verify if the account can execute Storlets
+            storlets_enabled = account_meta.get('x-account-meta-storlet-enabled','False')
+
+            if storlets_enabled == 'False':
+                self.logger.info('Swift Controller - Account disabled for storlets')
+                return HTTPBadRequest('Swift Controller - Account disabled for storlets')
+
+            if req.method == "PUT":
+                self.app.logger.info('Storlet middleware: PUT: '+str(storlet_list))
+                for storlet in storlet_list:
+                    storlet_metadata = json.loads(self.redis_connection.hgetall(str(account)+":"+str(storlet)))
+
+                    # if put storlet
+                    if storlet_metadata["method"] == "put":
+                        self.app.logger.debug('Storlet middleware: params: '+str(storlet_metadata))
+                        if storlet_metadata["executor_node"] == "proxy":
+
+                            if not storlet_gateway.authorizeStorletExecution(storlet):
+                                return HTTPUnauthorized('Swift Controller - Storlet: No permission')
+
+                            # execute the storlet
+                            old_env = req.environ.copy()
+                            orig_req = Request.blank(old_env['PATH_INFO'], old_env)
+                            #TODO: Review this function that can not be executed in the request part
+                            out_fd, app_iter = storlet_gateway.executeStorletOnProxy(req,parameters,out_fd)
+                            orig_resp.headers["Storlet-Executed"] = "True"
+
+                        elif storlets_put:
+                            req.headers["Storlet-Execute-On-Object-"+str(toProxy)] = storlet
+                            req.headers["Storlet-Execute-On-Object-Parameters-"+str(toProxy)] = parameters
+                            toObject = toObject + 1
+                            req.headers["Total-Storlets-To-Execute-On-Object"] = toObject
+
+                        self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
+
+                    # else: nothing to do
 
                 return self.app
 
         else:
             device, partition, account, container, obj = req.split_path(5, 5, rest_with_last=True)
             version = '0'
-
 
         # Response part
         orig_resp = req.get_response(self.app)
@@ -143,7 +181,7 @@ class StorletMiddleware(object):
                 # Save the storlets executed into the object metadata
                 if not storlet_executed_list:
                     return orig_resp
-                    
+
                 if not put_metadata(get_req, storlet_executed_list):
                     return orig_resp
 
@@ -158,10 +196,9 @@ class StorletMiddleware(object):
                                 request=orig_req,
                                 conditional_response=True)
 
-
-
-
         def valid_request(self, req, container):
+            # We only want to process PUT, POST and GET requests
+            # Also we ignore the calls that goes to the storlet, dependency and docker_image container
             if req.method == 'GET' and container in self.containers:
                 #Also we need to discard the copy calls.
                 if not "HTTP_X_COPY_FROM" in req.environ.keys():
