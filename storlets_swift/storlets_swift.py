@@ -76,8 +76,14 @@ class StorletMiddleware(object):
                             old_env = req.environ.copy()
                             orig_req = Request.blank(old_env['PATH_INFO'], old_env)
                             #TODO: Review this function that can not be executed in the request part
-                            out_fd, app_iter = storlet_gateway.executeStorletOnProxy(req,parameters,out_fd)
+                            out_fd, app_iter = storlet_gateway.execute_storlet_on_proxy_put(req,parameters,out_fd)
                             orig_resp.headers["Storlet-Executed"] = "True"
+                            req.environ['wsgi.input'] = app_iter
+
+                            if 'CONTENT_LENGTH' in self.request.environ:
+                                self.request.environ.pop('CONTENT_LENGTH')
+
+                            self.request.headers['Transfer-Encoding'] = 'chunked'
 
                         elif storlets_put:
                             req.headers["Storlet-Execute-On-Object-"+str(toProxy)] = storlet
@@ -86,8 +92,6 @@ class StorletMiddleware(object):
                             req.headers["Total-Storlets-To-Execute-On-Object"] = toObject
 
                         self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
-
-                    # else: nothing to do
 
                 return self.app
 
@@ -110,6 +114,7 @@ class StorletMiddleware(object):
                 If orig_resp is GET we will need to:
                 - Take the object metadata info
                 - Execute the storlets described in the metadata info
+                - Execute the storlets described in redis
                 - Return the result
                 """
                 object_metadata = get_metadata(orig_resp)
@@ -133,7 +138,7 @@ class StorletMiddleware(object):
                     # execute each storlet in the correct order
                     # TODO: how to take the parameters? are the same the parameters of compression and decompression
                     # TODO: Take from redis where execute the storlet (proxy or object server) Take the parameters from redis?
-                    #if node_to_execute = "object_server":
+                    if node_to_execute = "object_server":
                     if not storlet_gateway.authorizeStorletExecution(storlet):
                         return HTTPUnauthorized('Swift Controller - Storlet: No permission')
                     old_env = req.environ.copy()
@@ -174,27 +179,21 @@ class StorletMiddleware(object):
 
                 # Take all the storlets executed in the request part in the proxy
                 for index in range(int(orig_resp.headers["Total-Storlets-To-Execute-On-Proxy"])):
-                    self.logger.info('************************ VISUAL STORLET EXECUTION DIVISOR ***************************')
-                    storlet_executed_list.append(orig_resp.headers["Storlet-Execute-On-Proxy-"+str(index)])
-                    storlet_executed_list.append(orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(index)])
+                    self.logger.info('Storlet middleware: storlets to write in object metadata')
+                    storlet = orig_resp.headers["Storlet-Execute-On-Proxy-"+str(index)]
+                    parameters = orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(index)]
+                    storlet_dictionary = {"storlet_name":storlet, "params":parameters, "execution_server":"proxy"}
+                    storlet_executed_list.append(storlet_dictionary)
 
                 # Save the storlets executed into the object metadata
                 if not storlet_executed_list:
                     return orig_resp
 
-                if not put_metadata(get_req, storlet_executed_list):
+                if not put_metadata(get_resp, storlet_executed_list):
+                    #TODO: Rise exception writting metadata
                     return orig_resp
 
-                old_env = req.environ.copy()
-                orig_req = Request.blank(old_env['PATH_INFO'], old_env)
-                resp_headers = orig_resp.headers
-
-                resp_headers['Content-Length'] = None
-
-                return Response(app_iter=app_iter,
-                                headers=resp_headers,
-                                request=orig_req,
-                                conditional_response=True)
+                return orig_resp
 
         def valid_request(self, req, container):
             # We only want to process PUT, POST and GET requests
@@ -207,10 +206,7 @@ class StorletMiddleware(object):
 
             self.logger.info('Swift Controller - Valid req: NO!')
             return False
-        def valid_container(self, container):
-            if container != "storlet" and container != "dependency":
-                return True
-            return False
+
 
 
 def filter_factory(global_conf, **local_conf):

@@ -54,6 +54,13 @@ class ControllerGatewayStorlet():
 
         return req
 
+    def execute_storlet_on_proxy_put(self, req, params, input_pipe=None):
+        #TODO: Not tested. Review this method.
+        (out_md, app_iter) = \
+            self.gateway.gatewayProxyPutFlow(req,
+                                             self.container, self.obj)
+        return app_iter
+
     def execute_storlet_on_object(self, orig_resp, params, input_pipe=None):
         req = self.set_storlet_rquest(orig_resp, params)
 
