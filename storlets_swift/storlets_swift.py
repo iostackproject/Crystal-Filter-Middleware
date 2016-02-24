@@ -59,8 +59,8 @@ class StorletMiddleware(object):
 
                 account_meta = storlet_gateway.get_account_info()
                 out_fd = None
-                toProxy = 0
-                toObject = 0
+                on_proxy = 0
+                to_object = 0
 
                 # Verify if the account can execute Storlets
                 storlets_enabled = account_meta.get('x-account-meta-storlet-enabled','False')
@@ -82,11 +82,10 @@ class StorletMiddleware(object):
                             if not storlet_gateway.authorize_storlet_execution(storlet):
                                 return HTTPUnauthorized('Swift Controller - Storlet: No permission')
 
-
+                            # TODO: Review how to add pipeline in put
                             # execute the storlet
                             old_env = req.environ.copy()
                             orig_req = Request.blank(old_env['PATH_INFO'], old_env)
-                            #TODO: Review this function that can not be executed in the request part
                             params = storlet_metadata["params"]
                             self.app.logger.info('Storlet middleware: PARAMS: '+str(params))
                             app_iter = storlet_gateway.execute_storlet_on_proxy_put(req, params,out_fd)
@@ -97,11 +96,15 @@ class StorletMiddleware(object):
                                 req.environ.pop('CONTENT_LENGTH')
 
                             req.headers['Transfer-Encoding'] = 'chunked'
+                            req.headers["Storlet-Executed-On-Proxy-"+str(on_proxy)] = storlet
+                            req.headers["Storlet-Executed-On-Proxy-Parameters-"+str(on_proxy)] = params
+                            on_proxy = on_proxy + 1
+                            req.headers["Total-Storlets-Executed-On-Proxy"] = on_proxy
 
                         else:
-                            req.headers["Storlet-Execute-On-Object-"+str(toProxy)] = storlet
-                            req.headers["Storlet-Execute-On-Object-Parameters-"+str(toProxy)] = parameters
-                            toObject = toObject + 1
+                            req.headers["Storlet-Execute-On-Object-"+str(to_object)] = storlet
+                            req.headers["Storlet-Execute-On-Object-Parameters-"+str(to_object)] = parameters
+                            to_object = to_object + 1
                             req.headers["Total-Storlets-To-Execute-On-Object"] = toObject
 
                         self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
@@ -112,7 +115,7 @@ class StorletMiddleware(object):
 
         # Response part
         orig_resp = req.get_response(self.app)
-        self.app.logger.info('Storlet middleware: orig_resp: '+str(orig_resp))
+        self.app.logger.debug('Storlet middleware: orig_resp: '+str(orig_resp))
         # The next part of code is only executed by the object servers
         if self.execution_server == 'object':
             self.app.logger.info('Swift middleware - Object Server execution')
@@ -193,6 +196,7 @@ class StorletMiddleware(object):
                                 conditional_response=True)
 
             if req.method == "PUT":
+                self.app.logger.debug('Storlet middleware: Object-Server PUT: OK')
                 """
                 If orig_resp is PUT we will need to:
                 - Take storlets executed in the proxy from headers
@@ -206,10 +210,10 @@ class StorletMiddleware(object):
                 storlet_executed_list = []
 
                 # Take all the storlets executed in the request part in the proxy
-                for index in range(int(orig_resp.headers["Total-Storlets-To-Execute-On-Proxy"])):
+                for index in range(int(req.headers["Total-Storlets-Executed-On-Proxy"])):
                     self.app.logger.info('Storlet middleware: storlets to write in object metadata')
-                    storlet = orig_resp.headers["Storlet-Execute-On-Proxy-"+str(index)]
-                    parameters = orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(index)]
+                    storlet = req.headers["Storlet-Executed-On-Proxy-"+str(index)]
+                    parameters = req.headers["Storlet-Executed-On-Proxy-Parameters-"+str(index)]
                     storlet_dictionary = {"storlet_name":storlet, "params":parameters, "execution_server":"proxy"}
                     storlet_executed_list.append(storlet_dictionary)
 
