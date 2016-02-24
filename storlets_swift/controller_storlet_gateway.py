@@ -37,7 +37,7 @@ class ControllerGatewayStorlet():
         return False
 
 
-    def set_storlet_request(self,orig_resp,params):
+    def set_storlet_request_get(self,orig_resp,params):
         self.gateway = StorletGatewayDocker(self.hconf, self.logger, self.app,
                                             self.version, self.account,
                                             self.container, self.obj)
@@ -53,16 +53,32 @@ class ControllerGatewayStorlet():
         req.environ['QUERY_STRING'] = params
 
         return req
+    def set_storlet_request_put(self,req,params, input_pipe=None):
+        self.gateway = StorletGatewayDocker(self.hconf, self.logger, self.app,
+                                            self.version, self.account,
+                                            self.container, self.obj)
 
+        # Set Storlet Metadata to storletgateway
+        self.gateway.storlet_metadata = self.storlet_metadata
+
+        # Simulate Storlet request
+        new_env = dict(req.environ)
+        req = Request.blank(new_env['PATH_INFO'], new_env)
+        req.headers['X-Run-Storlet'] = self.storlet_name
+        self.gateway.augmentStorletRequest(req)
+        req.environ['QUERY_STRING'] = params
+
+        return req
     def execute_storlet_on_proxy_put(self, req, params, input_pipe=None):
-        #TODO: Not tested. Review this method.
+        req = self.set_storlet_request_put(req, params)
+
         (out_md, app_iter) = \
             self.gateway.gatewayProxyPutFlow(req,
                                              self.container, self.obj)
         return app_iter
 
     def execute_storlet_on_object(self, orig_resp, params, input_pipe=None):
-        req = self.set_storlet_rquest(orig_resp, params)
+        req = self.set_storlet_request_get(orig_resp, params)
 
         # Execute Storlet request
         (_, app_iter) = self.gateway.gatewayObjectGetFlow(req, self.container,
@@ -72,7 +88,7 @@ class ControllerGatewayStorlet():
 
 
     def execute_storlet_on_proxy(self, orig_resp, params, input_pipe=None):
-        req = self.set_storlet_rquest(orig_resp, params)
+        req = self.set_storlet_request_get(orig_resp, params)
 
         # Execute Storlet request
         (_, app_iter) = self.gateway.gatewayProxyGETFlow(req, self.container,

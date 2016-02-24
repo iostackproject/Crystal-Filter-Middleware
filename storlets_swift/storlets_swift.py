@@ -1,9 +1,14 @@
+from swift.common.utils import get_logger, is_success, cache_from_env
+
 import os
-from swift.common.swob import wsgify, HTTPUnauthorized, HTTPBadRequest
+from swift.common.swob import wsgify, HTTPUnauthorized, HTTPBadRequest, Response, Request
 from swift.common.utils import get_logger, split_path
 from swift.proxy.controllers.base import get_account_info, get_container_info
-from metadata_object_utils import put_metadata, get_metadata
+from controller_common import put_metadata, get_metadata
 import redis
+import ConfigParser
+import controller_storlet_gateway as csg
+import json
 
 class StorletMiddleware(object):
     def __init__(self, app, conf):
@@ -16,7 +21,7 @@ class StorletMiddleware(object):
         self.containers = [conf.get('handler_container'),
                            conf.get('handler_dependency')]
         #Redis  connection
-        self.redis_connection = redis.StrictRedis(host='10.30.103.250', port=16379, db=0)
+        self.redis_connection = redis.StrictRedis(host='127.0.0.1', port=6379, db=0)
         self.app.logger.debug('Storlet middleware: Init OK')
 
     @wsgify
@@ -28,64 +33,71 @@ class StorletMiddleware(object):
         Using split_path we can obtain the account id.
         '''
         if self.execution_server == 'proxy':
+
             version, account, container, obj = req.split_path(2, 4, rest_with_last=True)
+            self.app.logger.info('Storlet middleware: proxy-execution: ')
 
             if not self.valid_request(req, container):
                 return self.app
 
-            '''
-            This is the core part of the middleware. Here we should consult to a
-            Memcached/DB about the user. If this user has some storlet activated,
-            we need to add the storlet headers including the parameters defined by
-            the user. (now we are consulting the hashmap defined in the init function)
-            '''
-            storlet_list = self.redis_connection.lrange(str(account), 0, -1)
-
-            if not storlet_list:
-                None
-
-            storlet_gateway = csg.ControllerGatewayStorlet(self.hconf, self.logger, self.app, account,
-                                                            container, obj)
-
-            account_meta = storlet_gateway.getAccountInfo()
-            out_fd = None
-            toProxy = 0
-            toObject = 0
-
-            # Verify if the account can execute Storlets
-            storlets_enabled = account_meta.get('x-account-meta-storlet-enabled','False')
-
-            if storlets_enabled == 'False':
-                self.logger.info('Swift Controller - Account disabled for storlets')
-                return HTTPBadRequest('Swift Controller - Account disabled for storlets')
-
             if req.method == "PUT":
+
+                '''
+                This is the core part of the middleware. Here we should consult to a
+                Memcached/DB about the user. If this user has some storlet activated,
+                we need to add the storlet headers including the parameters defined by
+                the user. (now we are consulting the hashmap defined in the init function)
+                '''
+                storlet_list = self.redis_connection.lrange(str(account), 0, -1)
+                self.app.logger.info('Storlet middleware: storlet_list: %r ', storlet_list)
+                if not storlet_list:
+                    self.app.logger.info('Storlet middleware: NOT STORLET LIST')
+                    return self.app
+
+                storlet_gateway = csg.ControllerGatewayStorlet(self.hconf, self.app.logger, self.app, account,
+                                                                container, obj)
+
+                account_meta = storlet_gateway.get_account_info()
+                out_fd = None
+                toProxy = 0
+                toObject = 0
+
+                # Verify if the account can execute Storlets
+                storlets_enabled = account_meta.get('x-account-meta-storlet-enabled','False')
+
+                if storlets_enabled == 'False':
+                    self.app.logger.info('Swift Controller - Account disabled for storlets')
+                    return HTTPBadRequest('Swift Controller - Account disabled for storlets')
+
+                
                 self.app.logger.info('Storlet middleware: PUT: '+str(storlet_list))
                 for storlet in storlet_list:
-                    storlet_metadata = json.loads(self.redis_connection.hgetall(str(account)+":"+str(storlet)))
-
+                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    self.app.logger.info('Storlet middleware: PUT: '+str(storlet_metadata))
                     # if put storlet
-                    if storlet_metadata["method"] == "put":
+                    if storlet_metadata["PUT"] == "True":
                         self.app.logger.debug('Storlet middleware: params: '+str(storlet_metadata))
                         if storlet_metadata["executor_node"] == "proxy":
 
-                            if not storlet_gateway.authorizeStorletExecution(storlet):
+                            if not storlet_gateway.authorize_storlet_execution(storlet):
                                 return HTTPUnauthorized('Swift Controller - Storlet: No permission')
 
                             # execute the storlet
                             old_env = req.environ.copy()
                             orig_req = Request.blank(old_env['PATH_INFO'], old_env)
                             #TODO: Review this function that can not be executed in the request part
-                            out_fd, app_iter = storlet_gateway.execute_storlet_on_proxy_put(req,parameters,out_fd)
-                            orig_resp.headers["Storlet-Executed"] = "True"
+                            params = storlet_metadata["params"]
+                            self.app.logger.info('Storlet middleware: PARAMS: '+str(params))
+                            app_iter = storlet_gateway.execute_storlet_on_proxy_put(req, params,out_fd)
+                            req.headers["Storlet-Executed"] = "True"
                             req.environ['wsgi.input'] = app_iter
 
-                            if 'CONTENT_LENGTH' in self.request.environ:
-                                self.request.environ.pop('CONTENT_LENGTH')
+                            if 'CONTENT_LENGTH' in req.environ:
+                                req.environ.pop('CONTENT_LENGTH')
 
-                            self.request.headers['Transfer-Encoding'] = 'chunked'
+                            req.headers['Transfer-Encoding'] = 'chunked'
 
-                        elif storlets_put:
+                        else:
                             req.headers["Storlet-Execute-On-Object-"+str(toProxy)] = storlet
                             req.headers["Storlet-Execute-On-Object-Parameters-"+str(toProxy)] = parameters
                             toObject = toObject + 1
@@ -104,7 +116,7 @@ class StorletMiddleware(object):
 
         # The next part of code is only executed by the object servers
         if self.execution_server == 'object':
-            self.logger.info('Swift middleware - Object Server execution')
+            self.app.logger.info('Swift middleware - Object Server execution')
 
             if not self.valid_request(req, container):
                 return orig_resp
@@ -121,9 +133,9 @@ class StorletMiddleware(object):
                 if not object_metadata: # Any storlet to execute, return the response
                     return orig_resp
 
-                storlet_gateway = csg.ControllerGatewayStorlet(self.hconf, self.logger, self.app, account,
+                storlet_gateway = csg.ControllerGatewayStorlet(self.hconf, self.app.logger, self.app, account,
                                                                 container, obj)
-                account_meta = storlet_gateway.getAccountInfo()
+                account_meta = storlet_gateway.get_account_info()
                 out_fd = None
                 toProxy = 0
 
@@ -131,26 +143,43 @@ class StorletMiddleware(object):
                 storlets_enabled = account_meta.get('x-account-meta-storlet-enabled','False')
 
                 if storlets_enabled == 'False':
-                    self.logger.info('Swift Controller - Account disabled for storlets')
+                    self.app.logger.info('Swift Controller - Account disabled for storlets')
                     return HTTPBadRequest('Swift Controller - Account disabled for storlets')
 
-                for storlet in object_metadata:
+                # Execute the storlets described in the metadata info
+                for storlet in reversed(object_metadata):
                     # execute each storlet in the correct order
-                    # TODO: how to take the parameters? are the same the parameters of compression and decompression
                     # TODO: Take from redis where execute the storlet (proxy or object server) Take the parameters from redis?
-                    if node_to_execute = "object_server":
-                    if not storlet_gateway.authorizeStorletExecution(storlet):
+                    if node_to_execute == "object_server":
+
+                        if not storlet_gateway.authorize_storlet_execution(storlet):
+                            return HTTPUnauthorized('Swift Controller - Storlet: No permission')
+
+                        old_env = req.environ.copy()
+                        orig_req = Request.blank(old_env['PATH_INFO'], old_env)
+                        out_fd, app_iter = storlet_gateway.executeStorletOnObject(orig_resp,parameters+"&reverse=True",out_fd)
+
+                        orig_resp.headers["Storlet-Executed"] = "True"
+
+                    else:
+                        orig_resp.headers["Storlet-Execute-On-Proxy-"+str(toProxy)] = storlet
+                        orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(toProxy)] = parameters
+                        toProxy = toProxy + 1
+                        orig_resp.headers["Total-Storlets-To-Execute-On-Proxy"] = toProxy
+
+                # Execute the storlets described in redis
+                for index in range(int(orig_resp.headers["Total-Storlets-To-Execute-On-Object"])):
+                    storlet = orig_resp.headers["Storlet-Execute-On-Object-"+str(index)]
+                    parameters = orig_resp.headers["Storlet-Execute-On-Object-Parameters-"+str(index)]
+
+                    if not storlet_gateway.authorize_storlet_execution(storlet):
                         return HTTPUnauthorized('Swift Controller - Storlet: No permission')
+
                     old_env = req.environ.copy()
                     orig_req = Request.blank(old_env['PATH_INFO'], old_env)
-                    out_fd, app_iter = storlet_gateway.executeStorletOnObject(orig_resp,parameters,out_fd)
+                    out_fd, app_iter = storlet_gateway.executeStorletOnObject(orig_resp, parameters, out_fd)
 
                     orig_resp.headers["Storlet-Executed"] = "True"
-                    # else:
-                    # orig_resp.headers["Storlet-Execute-On-Proxy-"+str(toProxy)] = storlet
-                    # orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(toProxy)] = parameters
-                    # toProxy = toProxy + 1
-                    # orig_resp.headers["Total-Storlets-To-Execute-On-Proxy"] = toProxy
 
                 # Delete headers for the correct working of the Storlet framework
                 if 'Content-Length' in orig_resp.headers:
@@ -179,7 +208,7 @@ class StorletMiddleware(object):
 
                 # Take all the storlets executed in the request part in the proxy
                 for index in range(int(orig_resp.headers["Total-Storlets-To-Execute-On-Proxy"])):
-                    self.logger.info('Storlet middleware: storlets to write in object metadata')
+                    self.app.logger.info('Storlet middleware: storlets to write in object metadata')
                     storlet = orig_resp.headers["Storlet-Execute-On-Proxy-"+str(index)]
                     parameters = orig_resp.headers["Storlet-Execute-On-Proxy-Parameters-"+str(index)]
                     storlet_dictionary = {"storlet_name":storlet, "params":parameters, "execution_server":"proxy"}
@@ -193,20 +222,19 @@ class StorletMiddleware(object):
                     #TODO: Rise exception writting metadata
                     return orig_resp
 
-                return orig_resp
+            return orig_resp
 
-        def valid_request(self, req, container):
-            # We only want to process PUT, POST and GET requests
-            # Also we ignore the calls that goes to the storlet, dependency and docker_image container
-            if req.method == 'GET' and container in self.containers:
-                #Also we need to discard the copy calls.
-                if not "HTTP_X_COPY_FROM" in req.environ.keys():
-                    self.logger.info('Swift Controller - Valid req: OK!')
-                    return True
+    def valid_request(self, req, container):
+        # We only want to process PUT, POST and GET requests
+        # Also we ignore the calls that goes to the storlet, dependency and docker_image container
+        if (req.method == 'GET' or req.method == 'PUT')   and container not in self.containers:
+            #Also we need to discard the copy calls.
+            if not "HTTP_X_COPY_FROM" in req.environ.keys():
+                self.app.logger.info('Swift Controller - Valid req: OK!')
+                return True
 
-            self.logger.info('Swift Controller - Valid req: NO!')
-            return False
-
+        self.app.logger.info('Swift Controller - Valid req: NO!')
+        return False
 
 
 def filter_factory(global_conf, **local_conf):
@@ -236,6 +264,6 @@ def filter_factory(global_conf, **local_conf):
         mc_conf[key] = val
 
     def storlets_filter(app):
-        return StorletMiddleware(app, conf)
+        return StorletMiddleware(app, mc_conf)
 
     return storlets_filter
