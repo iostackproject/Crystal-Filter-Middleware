@@ -69,7 +69,7 @@ class StorletMiddleware(object):
                     self.app.logger.info('Swift Controller - Account disabled for storlets')
                     return HTTPBadRequest('Swift Controller - Account disabled for storlets')
 
-                
+
                 self.app.logger.info('Storlet middleware: PUT: '+str(storlet_list))
                 for storlet in storlet_list:
                     storlet_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
@@ -81,6 +81,7 @@ class StorletMiddleware(object):
 
                             if not storlet_gateway.authorize_storlet_execution(storlet):
                                 return HTTPUnauthorized('Swift Controller - Storlet: No permission')
+
 
                             # execute the storlet
                             old_env = req.environ.copy()
@@ -105,15 +106,13 @@ class StorletMiddleware(object):
 
                         self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
 
-                return self.app
-
         else:
             device, partition, account, container, obj = req.split_path(5, 5, rest_with_last=True)
             version = '0'
 
         # Response part
         orig_resp = req.get_response(self.app)
-
+        self.app.logger.info('Storlet middleware: orig_resp: '+str(orig_resp))
         # The next part of code is only executed by the object servers
         if self.execution_server == 'object':
             self.app.logger.info('Swift middleware - Object Server execution')
@@ -222,7 +221,7 @@ class StorletMiddleware(object):
                     #TODO: Rise exception writting metadata
                     return orig_resp
 
-            return orig_resp
+        return orig_resp
 
     def valid_request(self, req, container):
         # We only want to process PUT, POST and GET requests
