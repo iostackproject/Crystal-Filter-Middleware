@@ -89,9 +89,10 @@ class ControllerGatewayStorlet():
 
     def execute_storlet_on_proxy(self, orig_resp, params, input_pipe=None):
         req = self.set_storlet_request_get(orig_resp, params)
-
+        self.logger.info('Swift Controller - execute_storlet_on_proxy: Before execute')
         # Execute Storlet request
         (_, app_iter) = self.gateway.gatewayProxyGETFlow(req, self.container,
                                                          self.obj, orig_resp,
                                                          input_pipe)
+        self.logger.info('Swift Controller - execute_storlet_on_proxy: After execute')
         return app_iter.obj_data, app_iter
