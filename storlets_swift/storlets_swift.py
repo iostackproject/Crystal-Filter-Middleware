@@ -50,7 +50,7 @@ class StorletMiddleware(object):
             on_proxy = 0
             to_object = 0
 
-            if req.method == "PUT":
+            if req.method == "PUT" and storlet_list:
 
                 '''
                 This is the core part of the middleware. Here we should consult to a
@@ -75,17 +75,23 @@ class StorletMiddleware(object):
 
                 self.app.logger.info('Storlet middleware: PUT: '+str(storlet_list))
                 for storlet in storlet_list:
-                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    stor_acc_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+stor_acc_metadata["storlet_id"])
                     self.app.logger.info('Storlet middleware: PUT: '+str(storlet_metadata))
                     # if put storlet
-                    if storlet_metadata["PUT"] == "True":
+                    if storlet_metadata["is_put"] == "True":
                         self.app.logger.debug('Storlet middleware: params: '+str(storlet_metadata))
-                        if storlet_metadata["executor_node"] == "proxy":
+
+                        if "executor_node" in stor_acc_metadata.keys():
+                            executor_node = stor_acc_metadata["executor_node"]
+                        else:
+                            executor_node = storlet_metadata["executor_node"]
+
+                        if executor_node == "proxy":
 
                             if not storlet_gateway.authorize_storlet_execution(storlet):
                                 return HTTPUnauthorized('Swift Controller - Storlet: No permission')
 
-                            # TODO: Review how to add pipeline in put
                             # execute the storlet
                             old_env = req.environ.copy()
                             orig_req = Request.blank(old_env['PATH_INFO'], old_env)
@@ -112,18 +118,23 @@ class StorletMiddleware(object):
 
                         self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
 
-            if req.method == "GET":
+            if req.method == "GET" and storlet_list:
 
                 for storlet in storlet_list:
 
-                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    stor_acc_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+stor_acc_metadata["storlet_id"])
                     self.app.logger.info('Storlet middleware: GET: '+str(storlet_metadata))
 
-                    if storlet_metadata["GET"] == "True":
+                    if storlet_metadata["is_get"] == "True":
 
                         self.app.logger.debug('Storlet middleware: params: '+str(storlet_metadata))
+                        if "executor_node" in stor_acc_metadata.keys():
+                            executor_node = stor_acc_metadata["executor_node"]
+                        else:
+                            executor_node = storlet_metadata["executor_node"]
 
-                        if storlet_metadata["executor_node"] == "proxy":
+                        if executor_node == "proxy":
 
                             req.headers['Transfer-Encoding'] = 'chunked'
                             req.headers["Storlet-Execute-On-Proxy-"+str(on_proxy)] = storlet
@@ -138,6 +149,7 @@ class StorletMiddleware(object):
                             req.headers["Total-Storlets-To-Execute-On-Object"] = toObject
 
                         self.app.logger.debug('Storlet middleware: headers: '+str(req.headers))
+
         else:
             self.app.logger.info('Storlet middleware: object server execution')
             device, partition, account, container, obj = req.split_path(5, 5, rest_with_last=True)
@@ -272,14 +284,17 @@ class StorletMiddleware(object):
 
             if req.method == "PUT":
                 self.app.logger.debug('Storlet middleware: Object-Server PUT: OK')
+
                 """
                 If orig_resp is PUT we will need to:
                 - Take storlets executed in the proxy from headers
                 - Generate a GET copy
                 - Save the storlets executed into the object metadata
                 """
+
                 #TODO: This part needs information not setted yet
                 # convert put to get, to obtain the object metadata
+
                 get_req = req.copy_get()
                 get_resp = get_req.get_response(self.app)
                 storlet_executed_list = []
@@ -289,7 +304,10 @@ class StorletMiddleware(object):
                     self.app.logger.info('Storlet middleware: storlets to write in object metadata')
                     storlet = req.headers["Storlet-Executed-On-Proxy-"+str(index)]
                     parameters = req.headers["Storlet-Executed-On-Proxy-Parameters-"+str(index)]
-                    storlet_dictionary = {"storlet_name":storlet, "params":parameters, "execution_server":"proxy"}
+                    stor_acc_metadata = self.redis_connection.hgetall(str(account)+":"+str(storlet))
+                    storlet_metadata = self.redis_connection.hgetall(str(account)+":"+stor_acc_metadata["storlet_id"])
+                    storlet_dictionary = {"storlet_name":storlet, "params":parameters,
+                                        "execution_server":storlet_metadata["executor_server_reverse"]}
                     storlet_executed_list.append(storlet_dictionary)
 
                 # Save the storlets executed into the object metadata
@@ -297,6 +315,7 @@ class StorletMiddleware(object):
                     return orig_resp
 
                 if not put_metadata(get_resp, storlet_executed_list):
+                    self.app.logger.error('ERROR: Error writing metadata in an object')
                     #TODO: Rise exception writting metadata
                     return orig_resp
 
