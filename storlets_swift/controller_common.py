@@ -178,27 +178,6 @@ def get_file(self, env, version, account, path):
         return resp
     return False
 
-def create_virtual_folder(self, env, version, account, container, obj):
-    self.logger.info('Go to create {0}/{1}/{2}'.format(account,container,obj))
-
-    new_env = env.copy()
-    if 'HTTP_TRANSFER_ENCODING' in new_env.keys():
-        del new_env['HTTP_TRANSFER_ENCODING']
-
-    del(new_env['wsgi.input'])
-    del(new_env['HTTP_X_USE_CONTROLLER'])
-    new_env["CONTENT_LENGTH"] = 0
-    new_env['REQUEST_METHOD'] = 'PUT'
-    new_env['swift.source'] = 'CM'
-    new_env['PATH_INFO'] = os.path.join('/' + version, account, container, obj)
-    new_env['RAW_PATH_INFO'] = os.path.join('/' + version, account, container, obj)
-    req = Request.blank(new_env['PATH_INFO'], new_env)
-
-    resp = req.get_response(self.app)
-    if resp.status_int < 300 and resp.status_int >= 200:
-        return True
-    return False
-
 def create_container(self, env, version, account, container):
     new_env = env.copy()
     if 'HTTP_TRANSFER_ENCODING' in new_env.keys():
@@ -238,28 +217,6 @@ def save_file(self, env, version, account, container, obj, folder):
             return resp, True
     return resp, False
 
-def update_virtual_folder(self, env, version, account, container, folder, name, path):
-    new_env = env.copy()
-
-    if 'HTTP_TRANSFER_ENCODING' in new_env.keys():
-        del new_env['HTTP_TRANSFER_ENCODING']
-
-    del(new_env['wsgi.input'])
-    new_env["CONTENT_LENGTH"] = 0
-    new_env['REQUEST_METHOD'] = 'PUT'
-    new_env['swift.source'] = 'CM'
-    new_env['PATH_INFO'] = os.path.join('/' + version, account, container,folder)
-    new_env['RAW_PATH_INFO'] = os.path.join('/' + version, account, container, folder)
-    req = Request.blank(new_env['PATH_INFO'], new_env)
-
-    req.headers["X-Metadata"] = {'name':name,'path':path}
-
-
-
-    resp = req.get_response(self.app)
-    if resp.status_int < 300 and resp.status_int >= 200:
-        return True
-    return False
 
 def put_metadata(orig_resp, storlets_name_list):
     fd = orig_resp.app_iter._fp
