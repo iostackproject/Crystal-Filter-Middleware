@@ -50,7 +50,7 @@ class StorletMiddleware(object):
             on_proxy = 0
             to_object = 0
 
-            if req.method == "PUT" and storlet_list:
+            if req.method == "PUT":
 
                 '''
                 This is the core part of the middleware. Here we should consult to a
@@ -105,6 +105,7 @@ class StorletMiddleware(object):
                                 req.environ.pop('CONTENT_LENGTH')
 
                             req.headers['Transfer-Encoding'] = 'chunked'
+
                             req.headers["Storlet-Executed-On-Proxy-"+str(on_proxy)] = storlet
                             req.headers["Storlet-Executed-On-Proxy-Parameters-"+str(on_proxy)] = params
                             on_proxy = on_proxy + 1
@@ -155,6 +156,8 @@ class StorletMiddleware(object):
             device, partition, account, container, obj = req.split_path(5, 5, rest_with_last=True)
             version = '0'
 
+            #Execute PUTs in headers
+
         # Response part
         orig_resp = req.get_response(self.app)
         self.app.logger.debug('Storlet middleware: orig_resp: '+str(orig_resp))
@@ -188,7 +191,7 @@ class StorletMiddleware(object):
                 old_env = req.environ.copy()
                 orig_req = Request.blank(old_env['PATH_INFO'], old_env)
                 self.app.logger.info('Swift Controller - PARAMETERS:')
-                out_fd, app_iter = storlet_gateway.execute_storlet_on_proxy(orig_resp, parameters+"action=uncompress", out_fd)
+                out_fd, app_iter = storlet_gateway.execute_storlet_on_proxy(orig_resp, parameters+"reverse=True", out_fd)
 
 
             old_env = req.environ.copy()
