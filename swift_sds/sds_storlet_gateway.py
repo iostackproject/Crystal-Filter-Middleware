@@ -10,7 +10,7 @@ import sds_common as sc
 import json
 
 
-class VertigoGatewayStorlet():
+class SDSGatewayStorlet():
 
     def __init__(self, conf, logger, app, v, account, container, obj, method):
         self.conf = conf

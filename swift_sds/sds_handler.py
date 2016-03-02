@@ -1,10 +1,9 @@
 '''===========================================================================
-15-Oct-2015    josep.sampe    Initial implementation.
-24-Feb-2016    josep.sampe    Code refactor (DRY, PEP8, ...)
+29-Sep-2015    edgar.zamora    Initial implementation.
+02-Mar-2016    josep.sampe     Code refactor (DRY, PEP8, ...)
 ==========================================================================='''
 from swift.proxy.controllers.base import get_account_info
 from swift.common.swob import HTTPInternalServerError
-from swift.common.swob import HTTPUnauthorized
 from swift.common.swob import HTTPBadRequest
 from swift.common.swob import HTTPException
 from swift.common.swob import wsgify
@@ -17,7 +16,7 @@ import ConfigParser
 import json
 
 
-class NotVertigoRequest(Exception):
+class NotSDSRequest(Exception):
     pass
 
 
@@ -37,7 +36,7 @@ def _request_instance_property():
         try:
             self._extract_vaco()
         except ValueError:
-            raise NotVertigoRequest()
+            raise NotSDSRequest()
 
     return property(getter, setter,
                     doc="Force to tie the request to acc/con/obj vars")
@@ -55,20 +54,14 @@ class BaseSDSHandler(object):
         :param conf: gatway conf dict
         """
         self.request = request
-        self.vertigo_containers = [conf.get('mc_container'),
-                                   conf.get('mc_dependency'),
-                                   conf.get('storlet_container'),
+        self.sds_containers = [conf.get('storlet_container'),
                                    conf.get('storlet_dependency')]
-        self.available_triggers = ['X-Vertigo-Onget',
-                                   'X-Vertigo-Ondelete',
-                                   'X-Vertigo-Onput',
-                                   'X-Vertigo-Ontimer']
         self.app = app
         self.logger = logger
         self.conf = conf
 
     def _setup_storlet_gateway(self):
-        self.storlet_gateway = vsg.VertigoGatewayStorlet(
+        self.storlet_gateway = vsg.SDSGatewayStorlet(
             self.conf, self.logger, self.app, self.api_version,
             self.account, self.container, self.obj, self.request.method)
 
@@ -81,16 +74,6 @@ class BaseSDSHandler(object):
         """
         self._api_version, self._account, self._container, self._obj = \
             self._parse_vaco()
-
-    def get_vertigo_mc_data(self):
-        header = [i for i in self.available_triggers
-                  if i in self.request.headers.keys()]
-        if len(header) > 1:
-            raise HTTPUnauthorized('The system can only set 1 controller' +
-                                   ' each time.\n')
-        mc = self.request.headers[header[0]]
-
-        return header[0], mc
 
     @property
     def api_version(self):
@@ -220,8 +203,8 @@ class SDSProxyHandler(BaseSDSHandler):
         return runnable
 
     @property
-    def is_vertigo_object_put(self):
-        return (self.container in self.vertigo_containers and self.obj
+    def is_sds_object_put(self):
+        return (self.container in self.sds_containers and self.obj
                 and self.request.method == 'PUT')
 
     def handle_request(self):
@@ -411,21 +394,15 @@ class SDSObjectHandler(BaseSDSHandler):
         return original_resp
 
 
-class VertigoHandlerMiddleware(object):
+class SDSHandlerMiddleware(object):
 
-    def __init__(self, app, conf, vertigo_conf):
+    def __init__(self, app, conf, sds_conf):
         self.app = app
-        self.exec_server = vertigo_conf.get('execution_server')
-        self.logger = get_logger(conf, log_route='vertigo_handler')
-        self.vertigo_conf = vertigo_conf
-        self.containers = [vertigo_conf.get('mc_container'),
-                           vertigo_conf.get('mc_dependency'),
-                           vertigo_conf.get('storlet_container'),
-                           vertigo_conf.get('storlet_dependency')]
-        self.available_triggers = ['X-Vertigo-Onget',
-                                   'X-Vertigo-Ondelete',
-                                   'X-Vertigo-Onput',
-                                   'X-Vertigo-Ontimer']
+        self.exec_server = sds_conf.get('execution_server')
+        self.logger = get_logger(conf, log_route='sds_handler')
+        self.sds_conf = sds_conf
+        self.containers = [sds_conf.get('storlet_container'),
+                           sds_conf.get('storlet_dependency')]
         self.handler_class = self._get_handler(self.exec_server)
 
     def _get_handler(self, exec_server):
@@ -442,14 +419,14 @@ class VertigoHandlerMiddleware(object):
     def __call__(self, req):
         try:
             request_handler = self.handler_class(
-                req, self.vertigo_conf, self.app, self.logger)
-            self.logger.debug('vertigo_handler call in %s: with %s/%s/%s' %
+                req, self.sds_conf, self.app, self.logger)
+            self.logger.debug('sds_handler call in %s: with %s/%s/%s' %
                               (self.exec_server, request_handler.account,
                                request_handler.container,
                                request_handler.obj))
         except HTTPException:
             raise
-        except NotVertigoRequest:
+        except NotSDSRequest:
             return req.get_response(self.app)
 
         try:
@@ -468,15 +445,15 @@ def filter_factory(global_conf, **local_conf):
     conf = global_conf.copy()
     conf.update(local_conf)
 
-    vertigo_conf = dict()
-    vertigo_conf['execution_server'] = conf.get('execution_server', 'object')
+    sds_conf = dict()
+    sds_conf['execution_server'] = conf.get('execution_server', 'object')
 
-    vertigo_conf['storlet_timeout'] = conf.get('storlet_timeout', 40)
-    vertigo_conf['storlet_container'] = conf.get('storlet_container',
+    sds_conf['storlet_timeout'] = conf.get('storlet_timeout', 40)
+    sds_conf['storlet_container'] = conf.get('storlet_container',
                                                  'storlet')
-    vertigo_conf['storlet_dependency'] = conf.get('storlet_dependency',
+    sds_conf['storlet_dependency'] = conf.get('storlet_dependency',
                                                   'dependency')
-    vertigo_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')
+    sds_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')
 
     configParser = ConfigParser.RawConfigParser()
     configParser.read(conf.get('storlet_gateway_conf',
@@ -484,9 +461,9 @@ def filter_factory(global_conf, **local_conf):
 
     additional_items = configParser.items("DEFAULT")
     for key, val in additional_items:
-        vertigo_conf[key] = val
+        sds_conf[key] = val
 
-    def swift_vertigo(app):
-        return VertigoHandlerMiddleware(app, conf, vertigo_conf)
+    def swift_sds(app):
+        return SDSHandlerMiddleware(app, conf, sds_conf)
 
-    return swift_vertigo
+    return swift_sds
