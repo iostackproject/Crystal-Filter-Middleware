@@ -14,6 +14,7 @@ import sds_common as sc
 import redis
 import ConfigParser
 import json
+import time
 
 
 class NotSDSRequest(Exception):
@@ -187,7 +188,7 @@ class SDSProxyHandler(BaseSDSHandler):
             request, conf, app, logger)
 
         self.redis_connection = redis.StrictRedis(
-            host='127.0.0.1', port=6379, db=0)
+            host='controller', port=6379, db=0)
         self.storlet_data = self.redis_connection.lrange(
             str(self.account), 0, -1)
 
@@ -208,11 +209,14 @@ class SDSProxyHandler(BaseSDSHandler):
                 and self.request.method == 'PUT')
 
     def handle_request(self):
-        if hasattr(self, self.request.method):
-            resp = getattr(self, self.request.method)()
-            return resp
-        else:
+        if self.is_sds_object_put:
             return self.request.get_response(self.app)
+        else:
+            if hasattr(self, self.request.method):
+                resp = getattr(self, self.request.method)()
+                return resp
+            else:
+                return self.request.get_response(self.app)
 
     def _build_storlet_list(self):
         storlet_list = {}
@@ -276,18 +280,18 @@ class SDSProxyHandler(BaseSDSHandler):
         """
         PUT handler on Proxy
         """
-        self.app.logger.info('SDS Storlets - ' + str(self.storlet_data))
-
         if self.storlet_data:
+            self.app.logger.info('SDS Storlets - ' + str(self.storlet_data))
             storlet_list = self._build_storlet_list()
             self.request.headers['Storlet-List'] = json.dumps(storlet_list)
 
-        if storlet_list and self.is_account_storlet_enabled():
-            self._setup_storlet_gateway()
-            self.apply_storlet_on_put(storlet_list)
+            if storlet_list and self.is_account_storlet_enabled():
+                self._setup_storlet_gateway()
+                self.apply_storlet_on_put(storlet_list)
+            else:
+                self.logger.info('SDS Storlets - Account disabled for Storlets') 
         else:
-            self.logger.info('SDS Storlets - No Storlets to execute or ' +
-                             'Account disabled for Storlets')
+            self.logger.info('SDS Storlets - No Storlets to execute')
 
         return self.request.get_response(self.app)
 
@@ -383,13 +387,11 @@ class SDSObjectHandler(BaseSDSHandler):
         original_resp = self.request.get_response(self.app)
 
         if 'Storlet-List' in self.request.headers:
-            storlet_executed_list = json.loads(
-                self.request.headers['Storlet-List'])
-
-        if not sc.put_metadata(self.request, storlet_executed_list, self.app):
-            self.app.logger.error(
-                'SDS Storlets - ERROR: Error writing metadata in an object')
-            # TODO: Rise exception writting metadata
+            storlet_executed_list = json.loads(self.request.headers['Storlet-List'])
+            if not sc.put_metadata(self.request, storlet_executed_list, self.app):
+                self.app.logger.error(
+                    'SDS Storlets - ERROR: Error writing metadata in an object')
+                # TODO: Rise exception writting metadata
 
         return original_resp
 
@@ -430,8 +432,15 @@ class SDSHandlerMiddleware(object):
             return req.get_response(self.app)
 
         try:
-            return request_handler.handle_request()
-
+            
+            #start = time.time()
+            response = request_handler.handle_request()
+            #end = time.time() - start
+            #self.logger.exception('SDS Storlets - Execution Time: '+str(end))
+            
+            return response
+            #return request_handler.handle_request()
+            
         except HTTPException:
             self.logger.exception('SDS Storlets execution failed')
             raise

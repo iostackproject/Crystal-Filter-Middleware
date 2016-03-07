@@ -92,6 +92,10 @@ def put_metadata(req, storlets_name_list, app):
     get_resp = get_req.get_response(app)
 
     fd = get_resp.app_iter._fp
+    
+    for key in storlets_name_list:
+        storlets_name_list[key]['params'] = 'reverse=True'
+    
     try:
         write_metadata(fd, storlets_name_list)
     except:
