@@ -86,18 +86,30 @@ def write_metadata(fd, metadata, xattr_size=65536, md_key=None):
             raise
 
 
-def put_metadata(req, storlets_name_list, app):
+def put_metadata(req, iostack_params, app):
 
     get_req = req.copy_get()
     get_resp = get_req.get_response(app)
 
     fd = get_resp.app_iter._fp
-    
-    for key in storlets_name_list:
-        storlets_name_list[key]['params'] = 'reverse=True'
-    
+    file_path = get_resp.app_iter._data_file.rsplit('/', 1)[0]
+
+    print (file_path)
+
+    #obj_meta = read_metadata(fd,"user.swift.metadata")
+    #obj_meta["ETag"] = "f135bf2c1248c731e6681ca8e25e5225"
+    #write_metadata(fd, obj_meta, 65536, "user.swift.metadata")
+
+    for key in iostack_params["storlet-list"]:
+        current_params = iostack_params["storlet-list"][key]['params']
+        if current_params:
+            iostack_params[
+                "storlet-list"][key]['params'] = current_params + ',' + 'reverse=True'
+        else:
+            iostack_params["storlet-list"][key]['params'] = 'reverse=True'
+
     try:
-        write_metadata(fd, storlets_name_list)
+        write_metadata(fd, iostack_params)
     except:
         return False
     return True

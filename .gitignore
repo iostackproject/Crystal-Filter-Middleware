@@ -56,3 +56,5 @@ docs/_build/
 # PyBuilder
 target/
 /deploy_middleware.py
+/.project
+/.pydevproject
