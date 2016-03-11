@@ -86,10 +86,10 @@ class SDSGatewayStorlet():
             storlet, params, server = self.get_storlet_data(storlet_list[key])
 
             if server == self.server:
-                self.logger.info('Vertigo - Go to execute ' + storlet +
+                self.logger.info('SDS Storlets - Go to execute ' + storlet +
                                  ' storlet with parameters "' + params + '"')
                 if not self.authorize_storlet_execution(storlet):
-                    return HTTPUnauthorized('Vertigo - Storlet: No permission')
+                    return HTTPUnauthorized('SDS Storlets - Storlet: No permission')
 
                 out_fd, app_iter = self.launch_storlet(req_resp,
                                                        params, out_fd)

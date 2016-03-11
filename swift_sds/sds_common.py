@@ -96,15 +96,10 @@ def put_metadata(req, iostack_params, app):
 
     print (file_path)
 
-    #obj_meta = read_metadata(fd,"user.swift.metadata")
-    #obj_meta["ETag"] = "f135bf2c1248c731e6681ca8e25e5225"
-    #write_metadata(fd, obj_meta, 65536, "user.swift.metadata")
-
     for key in iostack_params["storlet-list"]:
         current_params = iostack_params["storlet-list"][key]['params']
         if current_params:
-            iostack_params[
-                "storlet-list"][key]['params'] = current_params + ',' + 'reverse=True'
+            iostack_params["storlet-list"][key]['params'] = current_params+','+'reverse=True'
         else:
             iostack_params["storlet-list"][key]['params'] = 'reverse=True'
 

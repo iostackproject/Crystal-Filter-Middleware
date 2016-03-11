@@ -201,16 +201,16 @@ class SDSProxyHandler(BaseSDSHandler):
         self.account_key_list = self.redis_connection.keys(
             "pipeline:" + str(self.account) + "*")
 
-        self.storlet_data = None
+        self.storlet_list = None
         key = self.account + "/" + self.container + "/" + self.obj
         for target in range(3):
             self.target_key = key.rsplit("/", target)[0]
             if 'pipeline:' + self.target_key in self.account_key_list:
-                self.storlet_data = self.redis_connection.lrange(
+                self.storlet_list = self.redis_connection.lrange(
                     'pipeline:' + self.target_key, 0, -1)
                 break
 
-        self.storlet_data = self.storlet_data[::-1]
+        self.storlet_list = self.storlet_list[::-1]
 
     def _parse_vaco(self):
         return self.request.split_path(4, 4, rest_with_last=True)
@@ -247,8 +247,8 @@ class SDSProxyHandler(BaseSDSHandler):
             op = mappings[object_size[0]]
             obj_lenght = int(object_size[1])
 
-            correct_size = op(
-                int(self.request.headers['Content-Length']), obj_lenght)
+            correct_size = op(int(self.request.headers['Content-Length']),
+                              obj_lenght)
 
         return correct_type and correct_size
 
@@ -260,16 +260,19 @@ class SDSProxyHandler(BaseSDSHandler):
     def handle_request(self):
         if self.is_sds_object_put:
             return self.request.get_response(self.app)
-        else:
+        elif self.is_account_storlet_enabled():
             if hasattr(self, self.request.method):
                 resp = getattr(self, self.request.method)()
                 return resp
             else:
                 return self.request.get_response(self.app)
+        else:
+            self.logger.info('SDS Storlets - Account disabled for Storlets')
+            return self.request.get_response(self.app)
 
-    def _build_storlet_list(self):
+    def _build_storlet_execution_list(self):
         storlet_list = {}
-        for storlet in self.storlet_data:
+        for storlet in self.storlet_list:
             stor_acc_metadata = self.redis_connection.hgetall(
                 str(self.target_key) + ":" + str(storlet))
 
@@ -301,23 +304,21 @@ class SDSProxyHandler(BaseSDSHandler):
         """
         GET handler on Proxy
         """
-        if self.storlet_data:
-            self.app.logger.info('SDS Storlets - ' + str(self.storlet_data))
-            storlet_list = self._build_storlet_list()
+        if self.storlet_list:
+            self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
+            storlet_list = self._build_storlet_execution_list()
             self.request.headers['Storlet-List'] = json.dumps(storlet_list)
 
         original_resp = self.request.get_response(self.app)
 
-        if 'Vertigo' in original_resp.headers and \
-                self.is_account_storlet_enabled():
-            self.logger.info(
-                'SDS Storlets - There are Storlets to execute '
-                'from object server')
+        if 'Vertigo' in original_resp.headers:
+            self.logger.info('SDS Storlets - There are Storlets to execute '
+                             'from object server')
             self._setup_storlet_gateway()
             storlet_list = json.loads(original_resp.headers['Vertigo'])
             return self.apply_storlet_on_get(original_resp, storlet_list)
 
-        # NO STORTLETS TO EXECUTE ON PROXY
+        # No Storlets to execute on Proxy
         elif 'Storlet-Executed' in original_resp.headers:
             if 'Transfer-Encoding' in original_resp.headers:
                 original_resp.headers.pop('Transfer-Encoding')
@@ -329,29 +330,25 @@ class SDSProxyHandler(BaseSDSHandler):
         """
         PUT handler on Proxy
         """
-
-        if self.storlet_data:
-            self.app.logger.info('SDS Storlets - ' + str(self.storlet_data))
-            storlet_list = self._build_storlet_list()
-            self.request.headers['Storlet-List'] = json.dumps(storlet_list)
-            self.request.headers[
-                'Original-Size'] = self.request.headers['Content-Length']
-            if 'ETag' in self.request.headers:
-                self.request.headers[
-                    'Original-Etag'] = self.request.headers['ETag']
-                # The object goes to be modified by some Storlet, so we
-                # delete the Etag from request headers to prevent checksum
-                # verification.
-                self.request.headers.pop('Etag')
-            else:
-                self.request.headers['Original-Etag'] = ""
-
-            if storlet_list and self.is_account_storlet_enabled():
+        if self.storlet_list:
+            self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
+            storlet_execution_list = self._build_storlet_execution_list()
+            if storlet_execution_list:
+                self.request.headers['Storlet-List'] = json.dumps(storlet_execution_list)
+                self.request.headers['Original-Size'] = self.request.headers['Content-Length']
+                if 'ETag' in self.request.headers:
+                    self.request.headers['Original-Etag'] = self.request.headers['ETag']
+                    # The object goes to be modified by some Storlet, so we
+                    # delete the Etag from request headers to prevent checksum
+                    # verification.
+                    self.request.headers.pop('ETag')
+                else:
+                    self.request.headers['Original-Etag'] = ""
+                
                 self._setup_storlet_gateway()
-                self.apply_storlet_on_put(storlet_list)
+                self.apply_storlet_on_put(storlet_execution_list)
             else:
-                self.logger.info(
-                    'SDS Storlets - Account disabled for Storlets')
+                self.logger.info('SDS Storlets - No Storlets to execute')
         else:
             self.logger.info('SDS Storlets - No Storlets to execute')
 
@@ -378,12 +375,17 @@ class SDSObjectHandler(BaseSDSHandler):
         return self.request.params.get('multipart-manifest') == 'get'
 
     def handle_request(self):
-        if hasattr(self, self.request.method):
-            return getattr(self, self.request.method)()
+        if self.is_account_storlet_enabled():
+            if hasattr(self, self.request.method):
+                return getattr(self, self.request.method)()
+            else:
+                return self.request.get_response(self.app)
+                # un-defined method should be NOT ALLOWED
+                # return HTTPMethodNotAllowed(request=self.request)
         else:
+            self.logger.info('SDS Storlets - Account disabled for Storlets')
             return self.request.get_response(self.app)
-            # un-defined method should be NOT ALLOWED
-            # return HTTPMethodNotAllowed(request=self.request)
+            
 
     def _augment_storlet_list(self, storlet_list):
         new_storlet_list = {}
@@ -408,10 +410,8 @@ class SDSObjectHandler(BaseSDSHandler):
         iostack_metadata = {}
         storlet_executed_list = json.loads(
             self.request.headers['Storlet-List'])
-        iostack_metadata[
-            "original-etag"] = self.request.headers['Original-Etag']
-        iostack_metadata[
-            "original-size"] = self.request.headers['Original-Size']
+        iostack_metadata["original-etag"] = self.request.headers['Original-Etag']
+        iostack_metadata["original-size"] = self.request.headers['Original-Size']
         iostack_metadata["storlet-list"] = storlet_executed_list
 
         return iostack_metadata
@@ -423,32 +423,23 @@ class SDSObjectHandler(BaseSDSHandler):
     def GET(self):
         """
         GET handler on Object
-        """
-
-        """
         If orig_resp is GET we will need to:
         - Take the object metadata info
         - Execute the storlets described in the metadata info
         - Execute the storlets described in redis
         - Return the result
         """
-
         original_resp = self.request.get_response(self.app)
 
         iostack_metadata = sc.get_metadata(original_resp)
+        
         if iostack_metadata:
             original_resp.headers["ETag"] = iostack_metadata["original-etag"]
-            original_resp.headers[
-                "Content-Length"] = iostack_metadata["original-size"]
-            storlet_list = self._augment_storlet_list(
-                iostack_metadata["storlet-list"])
-
-            if self.is_account_storlet_enabled():
-                self._setup_storlet_gateway()
-                return self.apply_storlet_on_get(original_resp, storlet_list)
-            else:
-                self.logger.info(
-                    'SDS Storlets - Account disabled for Storlets')
+            original_resp.headers["Content-Length"] = iostack_metadata["original-size"]
+            storlet_list = self._augment_storlet_list(iostack_metadata["storlet-list"])
+            self._setup_storlet_gateway()
+            
+            return self.apply_storlet_on_get(original_resp, storlet_list)
 
         return original_resp
 
@@ -456,8 +447,7 @@ class SDSObjectHandler(BaseSDSHandler):
         """
         PUT handler on Object
         """
-        if 'Vertigo' in self.request.headers and \
-                self.is_account_storlet_enabled():
+        if 'Vertigo' in self.request.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute')
             self._setup_storlet_gateway()
             storlet_list = json.loads(self.request.headers['Vertigo'])
@@ -493,9 +483,8 @@ class SDSHandlerMiddleware(object):
         elif exec_server == 'object':
             return SDSObjectHandler
         else:
-            raise ValueError(
-                'configuration error: execution_server must be either proxy'
-                ' or object but is %s' % exec_server)
+            raise ValueError('configuration error: execution_server must'
+                ' be either proxy or object but is %s' % exec_server)
 
     @wsgify
     def __call__(self, req):
@@ -513,10 +502,10 @@ class SDSHandlerMiddleware(object):
 
         try:
 
-            # start = time.time()
+            #start = time.time()
             response = request_handler.handle_request()
-            # end = time.time() - start
-
+            #end = time.time() - start
+            
             # self.logger.exception('SDS Storlets - Execution Time: '+str(end))
 
             return response
