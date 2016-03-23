@@ -94,15 +94,19 @@ def put_metadata(req, iostack_params, app):
     fd = get_resp.app_iter._fp
     file_path = get_resp.app_iter._data_file.rsplit('/', 1)[0]
 
-    print (file_path)
-
     for key in iostack_params["storlet-list"]:
         current_params = iostack_params["storlet-list"][key]['params']
         if current_params:
             iostack_params["storlet-list"][key]['params'] = current_params+','+'reverse=True'
         else:
             iostack_params["storlet-list"][key]['params'] = 'reverse=True'
+        
+        iostack_params["storlet-list"][key]['execution_server'] = iostack_params["storlet-list"][key]['execution_server_reverse']
+        iostack_params["storlet-list"][key].pop('execution_server_reverse')
 
+    print (iostack_params)
+    print (file_path)
+    
     try:
         write_metadata(fd, iostack_params)
     except:

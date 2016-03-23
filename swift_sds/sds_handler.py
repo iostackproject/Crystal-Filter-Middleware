@@ -1,6 +1,7 @@
 '''===========================================================================
 29-Sep-2015    edgar.zamora    Initial implementation.
-02-Mar-2016    josep.sampe     Code refactor (DRY, PEP8, ...)
+02-Mar-2016    josep.sampe     Code refactor
+21-Mar-2016    josep.sampe     Improved performance
 ==========================================================================='''
 from swift.proxy.controllers.base import get_account_info
 from swift.common.swob import HTTPInternalServerError
@@ -16,7 +17,6 @@ import mimetypes
 import operator
 import redis
 import json
-import time
 
 mappings = {'>': operator.gt, '>=': operator.ge,
             '==': operator.eq, '<=': operator.le, '<': operator.lt,
@@ -66,6 +66,12 @@ class BaseSDSHandler(object):
         self.app = app
         self.logger = logger
         self.conf = conf
+        
+        self.redis_host = conf.get('redis_host')
+        self.redis_port = conf.get('redis_port')
+        self.redis_db = conf.get('redis_db')
+        
+        self.method = self.request.method.lower()
 
     def _setup_storlet_gateway(self):
         self.storlet_gateway = vsg.SDSGatewayStorlet(
@@ -160,7 +166,8 @@ class BaseSDSHandler(object):
         Call gateway module to get result of storlet execution
         in PUT flow
         """
-        return self.storlet_gateway.execute_storlet(self.request, storlet_list)
+        return self.storlet_gateway.execute_storlet(self.request, storlet_list, 
+                                                    self.storlet_metadata)
 
     def _call_storlet_gateway_on_get(self, resp, storlet_list):
         """
@@ -190,27 +197,27 @@ class BaseSDSHandler(object):
 
 class SDSProxyHandler(BaseSDSHandler):
 
-    def __init__(self, request, conf, app, logger):
+    def __init__(self, request, conf, app, logger):        
         super(SDSProxyHandler, self).__init__(
             request, conf, app, logger)
 
-        self.redis_connection = redis.StrictRedis(
-            host='controller', port=6379, db=0)
+        self.redis_connection = redis.StrictRedis(self.redis_host, 
+                                                  self.redis_port, 
+                                                  self.redis_db)
 
         # Dynamic binding of policies
-        self.account_key_list = self.redis_connection.keys(
-            "pipeline:" + str(self.account) + "*")
+        account_key_list = self.redis_connection.keys("pipeline:"+
+                                                      str(self.account)+ 
+                                                      "*")
 
         self.storlet_list = None
         key = self.account + "/" + self.container + "/" + self.obj
         for target in range(3):
             self.target_key = key.rsplit("/", target)[0]
-            if 'pipeline:' + self.target_key in self.account_key_list:
+            if 'pipeline:' + self.target_key in account_key_list:
                 self.storlet_list = self.redis_connection.lrange(
-                    'pipeline:' + self.target_key, 0, -1)
+                    'pipeline:' + self.target_key, 0, -1)[::-1]
                 break
-
-        self.storlet_list = self.storlet_list[::-1]
 
     def _parse_vaco(self):
         return self.request.split_path(4, 4, rest_with_last=True)
@@ -271,52 +278,67 @@ class SDSProxyHandler(BaseSDSHandler):
             return self.request.get_response(self.app)
 
     def _build_storlet_execution_list(self):
+        general_metadata = {}
+        specific_metadata = {}
         storlet_list = {}
+        
         for storlet in self.storlet_list:
-            stor_acc_metadata = self.redis_connection.hgetall(
+            specific_metadata[storlet] = self.redis_connection.hgetall(
                 str(self.target_key) + ":" + str(storlet))
 
-            storlet_metadata = self.redis_connection.hgetall(
-                "storlet:" + stor_acc_metadata["storlet_id"])
+            storlet_id = specific_metadata[storlet]["id"]
+            
+            general_metadata[storlet] = self.redis_connection.hgetall(
+                                                "storlet:" + storlet_id)
+            
+            # Merge both dictionaries
+            general_metadata[storlet].update(specific_metadata[storlet])
 
-            if storlet_metadata["is_" + self.request.method.lower()] == "True":
-                if self.check_size_type(stor_acc_metadata):
-                    if "execution_server" in stor_acc_metadata.keys():
-                        server = stor_acc_metadata["execution_server"]
-                    else:
-                        server = storlet_metadata["execution_server"]
+            # Chek conditions
+            if general_metadata[storlet]["is_" + self.method] == "True":
+                if self.check_size_type(specific_metadata[storlet]):
+                    
+                    server = general_metadata[storlet]["execution_server"]
+                    reverse = general_metadata[storlet]["execution_server_reverse"]
+                    params = general_metadata[storlet]["params"]
 
                     storlet_execution = {'storlet': storlet,
-                                         'params': stor_acc_metadata["params"],
-                                         'server': server}
+                                         'params': params,
+                                         'execution_server': server,
+                                         'execution_server_reverse': reverse,
+                                         'id': storlet_id}
+                    
                     launch_key = len(storlet_list.keys())
                     storlet_list[launch_key] = storlet_execution
+            
+        self.storlet_metadata = general_metadata
 
         return storlet_list
 
     def _call_storlet_gateway_on_get(self, resp, storlet_list):
-        resp = self.storlet_gateway.execute_storlet(resp, storlet_list)
-        resp.headers.pop('Vertigo')
+        resp = self.storlet_gateway.execute_storlet(resp, storlet_list,
+                                                    self.storlet_metadata)
+        resp.headers.pop('SDS-IOSTACK')
         resp.headers.pop("Storlet-Executed")
         return resp
 
     def GET(self):
         """
         GET handler on Proxy
-        """
+        """        
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
-            storlet_list = self._build_storlet_execution_list()
-            self.request.headers['Storlet-List'] = json.dumps(storlet_list)
-
+            storlet_execution_list = self._build_storlet_execution_list()
+            self.request.headers['Storlet-List'] = json.dumps(storlet_execution_list)
+        
         original_resp = self.request.get_response(self.app)
 
-        if 'Vertigo' in original_resp.headers:
+        if 'SDS-IOSTACK' in original_resp.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute '
                              'from object server')
             self._setup_storlet_gateway()
-            storlet_list = json.loads(original_resp.headers['Vertigo'])
-            return self.apply_storlet_on_get(original_resp, storlet_list)
+            storlet_execution_list = json.loads(original_resp.headers['SDS-IOSTACK'])
+            return self.apply_storlet_on_get(original_resp, storlet_execution_list)
 
         # No Storlets to execute on Proxy
         elif 'Storlet-Executed' in original_resp.headers:
@@ -330,6 +352,7 @@ class SDSProxyHandler(BaseSDSHandler):
         """
         PUT handler on Proxy
         """
+        
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
             storlet_execution_list = self._build_storlet_execution_list()
@@ -347,11 +370,12 @@ class SDSProxyHandler(BaseSDSHandler):
                 
                 self._setup_storlet_gateway()
                 self.apply_storlet_on_put(storlet_execution_list)
+                
             else:
                 self.logger.info('SDS Storlets - No Storlets to execute')
         else:
             self.logger.info('SDS Storlets - No Storlets to execute')
-
+        
         return self.request.get_response(self.app)
 
 
@@ -360,6 +384,7 @@ class SDSObjectHandler(BaseSDSHandler):
     def __init__(self, request, conf, app, logger):
         super(SDSObjectHandler, self).__init__(
             request, conf, app, logger)
+        
 
     def _parse_vaco(self):
         _, _, acc, cont, obj = self.request.split_path(
@@ -388,11 +413,22 @@ class SDSObjectHandler(BaseSDSHandler):
             
 
     def _augment_storlet_list(self, storlet_list):
+        
+        rc = redis.StrictRedis(self.redis_host, 
+                               self.redis_port, 
+                               self.redis_db)
         new_storlet_list = {}
-
+        self.storlet_metadata = {}
+    
         # REVERSE EXECUTION
         if storlet_list:
             for key in reversed(sorted(storlet_list)):
+                storlet = storlet_list[key]['storlet']
+                storlet_id = storlet_list[key]['id']
+
+                self.storlet_metadata[storlet] = rc.hgetall("storlet:"+
+                                                            storlet_id)
+                
                 launch_key = len(new_storlet_list.keys())
                 new_storlet_list[launch_key] = storlet_list[key]
 
@@ -401,6 +437,11 @@ class SDSObjectHandler(BaseSDSHandler):
             req_storlet_list = json.loads(self.request.headers['Storlet-List'])
 
             for key in sorted(req_storlet_list):
+                storlet = req_storlet_list[key]['storlet']
+                storlet_id = req_storlet_list[key]['id']
+
+                self.storlet_metadata[storlet] = rc.hgetall("storlet:"+
+                                                            storlet_id)
                 launch_key = len(new_storlet_list.keys())
                 new_storlet_list[launch_key] = req_storlet_list[key]
 
@@ -417,7 +458,8 @@ class SDSObjectHandler(BaseSDSHandler):
         return iostack_metadata
 
     def _call_storlet_gateway_on_get(self, resp, storlet_list):
-        resp = self.storlet_gateway.execute_storlet(resp, storlet_list)
+        resp = self.storlet_gateway.execute_storlet(resp, storlet_list,
+                                                    self.storlet_metadata)
         return resp
 
     def GET(self):
@@ -430,7 +472,7 @@ class SDSObjectHandler(BaseSDSHandler):
         - Return the result
         """
         original_resp = self.request.get_response(self.app)
-
+        
         iostack_metadata = sc.get_metadata(original_resp)
         
         if iostack_metadata:
@@ -447,12 +489,12 @@ class SDSObjectHandler(BaseSDSHandler):
         """
         PUT handler on Object
         """
-        if 'Vertigo' in self.request.headers:
+        if 'SDS-IOSTACK' in self.request.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute')
             self._setup_storlet_gateway()
-            storlet_list = json.loads(self.request.headers['Vertigo'])
+            storlet_list = json.loads(self.request.headers['SDS-IOSTACK'])
             self.apply_storlet_on_put(storlet_list)
-
+        
         original_resp = self.request.get_response(self.app)
 
         if 'Storlet-List' in self.request.headers:
@@ -476,7 +518,7 @@ class SDSHandlerMiddleware(object):
         self.containers = [sds_conf.get('storlet_container'),
                            sds_conf.get('storlet_dependency')]
         self.handler_class = self._get_handler(self.exec_server)
-
+        
     def _get_handler(self, exec_server):
         if exec_server == 'proxy':
             return SDSProxyHandler
@@ -501,16 +543,7 @@ class SDSHandlerMiddleware(object):
             return req.get_response(self.app)
 
         try:
-
-            #start = time.time()
-            response = request_handler.handle_request()
-            #end = time.time() - start
-            
-            # self.logger.exception('SDS Storlets - Execution Time: '+str(end))
-
-            return response
-            # return request_handler.handle_request()
-
+            return request_handler.handle_request()
         except HTTPException:
             self.logger.exception('SDS Storlets execution failed')
             raise
@@ -526,6 +559,10 @@ def filter_factory(global_conf, **local_conf):
 
     sds_conf = dict()
     sds_conf['execution_server'] = conf.get('execution_server', 'object')
+    
+    sds_conf['redis_host'] = conf.get('redis_host', 'controller')
+    sds_conf['redis_port'] = conf.get('redis_port', 6379)
+    sds_conf['redis_db'] = conf.get('redis_db', 0)
 
     sds_conf['storlet_timeout'] = conf.get('storlet_timeout', 40)
     sds_conf['storlet_container'] = conf.get('storlet_container',

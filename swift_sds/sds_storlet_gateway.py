@@ -2,11 +2,10 @@
 16-Oct-2015    josep.sampe    Initial implementation.
 05-Feb-2016    josep.sampe    Added Proxy execution.
 01-Mar-2016    josep.sampe    Addded pipeline (multi-node)
+22-Mar-2016    josep.sampe    Enhanced performance
 ==========================================================================='''
 from swift.common.swob import Request
-from swift.common.swob import HTTPUnauthorized
 from storlet_gateway.storlet_docker_gateway import StorletGatewayDocker
-import sds_common as sc
 import json
 
 
@@ -27,23 +26,6 @@ class SDSGatewayStorlet():
         self.server = self.conf['execution_server']
         self.gateway_method = None
 
-    def get_storlet_data(self, storlet_data):
-        storlet = storlet_data["storlet"]
-        parameters = storlet_data["params"]
-        server = storlet_data["server"]
-
-        return storlet, parameters, server
-
-    def authorize_storlet_execution(self, storlet):
-        resp = sc.make_swift_request("HEAD", self.account,
-                                     self.conf["storlet_container"],
-                                     storlet)
-        if resp.status_int < 300 and resp.status_int >= 200:
-            self.storlet_metadata = resp.headers
-            self.storlet_name = storlet
-            return True
-        return False
-
     def set_storlet_request(self, req_resp, params):
 
         self.gateway = StorletGatewayDocker(self.conf, self.logger, self.app,
@@ -54,9 +36,16 @@ class SDSGatewayStorlet():
                                       self.server.title() +
                                       self.method.title() + "Flow")
 
-        # Set Storlet Metadata to storletgateway
-        self.gateway.storlet_metadata = self.storlet_metadata
-
+        # Set the Storlet Metadata to storletgateway
+        md = {}
+        md['X-Object-Meta-Storlet-Main'] = self.storlet_metadata['main']
+        md['X-Object-Meta-Storlet-Main'] = self.storlet_metadata['main']
+        md['X-Object-Meta-Storlet-Dependency'] = self.storlet_metadata['dependencies']
+        md['Content-Length'] = self.storlet_metadata['content_length']
+        md['X-Timestamp'] = self.storlet_metadata['timestamp']
+        
+        self.gateway.storlet_metadata = md
+        
         # Simulate Storlet request
         new_env = dict(req_resp.environ)
         req = Request.blank(new_env['PATH_INFO'], new_env)
@@ -75,35 +64,39 @@ class SDSGatewayStorlet():
 
         return app_iter.obj_data, app_iter
 
-    def execute_storlet(self, req_resp, storlet_list):
+    def execute_storlet(self, req_resp, storlet_list, storlet_md):
         out_fd = None
         on_other_server = {}
 
         # Execute multiple Storlets, PIPELINE, if any.
         for key in sorted(storlet_list):
-            # Get Storlet and parameters
 
-            storlet, params, server = self.get_storlet_data(storlet_list[key])
+            storlet = storlet_list[key]["storlet"]
+            params = storlet_list[key]["params"]
+            server = storlet_list[key]["execution_server"]
+            storlet_id = storlet_list[key]["id"]
+
+            self.storlet_name = storlet
+            self.storlet_metadata = storlet_md[storlet]
 
             if server == self.server:
                 self.logger.info('SDS Storlets - Go to execute ' + storlet +
                                  ' storlet with parameters "' + params + '"')
-                if not self.authorize_storlet_execution(storlet):
-                    return HTTPUnauthorized('SDS Storlets - Storlet: No permission')
 
                 out_fd, app_iter = self.launch_storlet(req_resp,
-                                                       params, out_fd)
-                # Notify to the Proxy that Storlet was executed in the
-                # object-server
+                                                       params, 
+                                                       out_fd)
+
                 req_resp.headers["Storlet-Executed"] = True
             else:
                 storlet_execution = {'storlet': storlet,
                                      'params': params,
-                                     'server': server}
+                                     'execution_server': server,
+                                     'id': storlet_id}
                 on_other_server[key] = storlet_execution
 
         if on_other_server:
-            req_resp.headers['Vertigo'] = json.dumps(on_other_server)
+            req_resp.headers['SDS-IOSTACK'] = json.dumps(on_other_server)
 
         if 'Storlet-Executed' in req_resp.headers:
             if isinstance(req_resp, Request):
