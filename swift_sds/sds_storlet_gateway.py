@@ -39,11 +39,9 @@ class SDSGatewayStorlet():
         # Set the Storlet Metadata to storletgateway
         md = {}
         md['X-Object-Meta-Storlet-Main'] = self.storlet_metadata['main']
-        md['X-Object-Meta-Storlet-Main'] = self.storlet_metadata['main']
         md['X-Object-Meta-Storlet-Dependency'] = self.storlet_metadata['dependencies']
         md['Content-Length'] = self.storlet_metadata['content_length']
-        md['X-Timestamp'] = self.storlet_metadata['timestamp']
-        
+        md['ETag'] = self.storlet_metadata['etag']
         self.gateway.storlet_metadata = md
         
         # Simulate Storlet request
@@ -66,8 +64,9 @@ class SDSGatewayStorlet():
 
     def execute_storlet(self, req_resp, storlet_list, storlet_md):
         out_fd = None
+        storlet_executed = False
         on_other_server = {}
-
+        
         # Execute multiple Storlets, PIPELINE, if any.
         for key in sorted(storlet_list):
 
@@ -86,22 +85,21 @@ class SDSGatewayStorlet():
                 out_fd, app_iter = self.launch_storlet(req_resp,
                                                        params, 
                                                        out_fd)
-
-                req_resp.headers["Storlet-Executed"] = True
+                storlet_executed = True
             else:
                 storlet_execution = {'storlet': storlet,
                                      'params': params,
                                      'execution_server': server,
                                      'id': storlet_id}
                 on_other_server[key] = storlet_execution
-
+        
         if on_other_server:
             req_resp.headers['SDS-IOSTACK'] = json.dumps(on_other_server)
-
-        if 'Storlet-Executed' in req_resp.headers:
+        
+        if storlet_executed:
             if isinstance(req_resp, Request):
                 req_resp.environ['wsgi.input'] = app_iter
             else:
                 req_resp.app_iter = app_iter
-
+        
         return req_resp
