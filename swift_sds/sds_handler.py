@@ -198,14 +198,7 @@ class BaseSDSHandler(object):
         self.storlet_metadata.update(general_metadata)
 
     def apply_storlet_on_get(self, resp, storlet_list):
-        resp = self._call_storlet_gateway_on_get(resp, storlet_list)
-
-        if 'Transfer-Encoding' in resp.headers:
-            resp.headers.pop('Transfer-Encoding')
-        if 'SDS-IOSTACK' in resp.headers:    
-            resp.headers.pop('SDS-IOSTACK')
-            
-        return resp
+        return self._call_storlet_gateway_on_get(resp, storlet_list)
 
     def apply_storlet_on_put(self, storlet_list):
         self.request = self._call_storlet_gateway_on_put(storlet_list)
@@ -261,8 +254,8 @@ class SDSProxyHandler(BaseSDSHandler):
         if 'object_type' in storlet_metadata:
             obj_type = storlet_metadata['object_type']
             correct_type = self._get_object_type() in \
-                self.redis_connection.lrange(obj_type, 0, -1)
-
+                self.redis_connection.lrange("object_type:"+obj_type, 0, -1)
+            
         if 'object_size' in storlet_metadata:
             object_size = storlet_metadata['object_size'].replace("'", "\"")
             object_size = json.loads(object_size)
@@ -337,31 +330,30 @@ class SDSProxyHandler(BaseSDSHandler):
         """        
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
-            storlet_execution_list = self._build_storlet_execution_list()
-            self.request.headers['Storlet-List'] = json.dumps(storlet_execution_list)
+            storlet_exec_list = self._build_storlet_execution_list()
+            self.request.headers['SDS-IOSTACK'] = json.dumps(storlet_exec_list)
 
-        original_resp = self.request.get_response(self.app)
+        resp = self.request.get_response(self.app)
         
-        if 'SDS-IOSTACK' in original_resp.headers:
+        if 'SDS-IOSTACK' in resp.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute '
                              'from object server')
             self._setup_storlet_gateway()
-            storlet_execution_list = json.loads(original_resp.headers['SDS-IOSTACK'])
-            self._update_storlet_metadata(storlet_execution_list)
-            return self.apply_storlet_on_get(original_resp, storlet_execution_list)
+            storlet_exec_list = json.loads(resp.headers.pop('SDS-IOSTACK'))
+            self._update_storlet_metadata(storlet_exec_list)
+            return self.apply_storlet_on_get(resp, storlet_exec_list)
   
-        return original_resp
+        return resp
 
     def PUT(self):
         """
         PUT handler on Proxy
         """
-        
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
             storlet_execution_list = self._build_storlet_execution_list()
             if storlet_execution_list:
-                self.request.headers['Storlet-List'] = json.dumps(storlet_execution_list)
+                self.request.headers['Storlet-Executed-List'] = json.dumps(storlet_execution_list)
                 self.request.headers['Original-Size'] = self.request.headers.get('Content-Length','')
                 self.request.headers['Original-Etag'] = self.request.headers.get('ETag','')
                 
@@ -414,7 +406,7 @@ class SDSObjectHandler(BaseSDSHandler):
             return self.request.get_response(self.app)
             
 
-    def _augment_storlet_list(self, storlet_list):
+    def _augment_storlet_execution_list(self, storlet_list):
         new_storlet_list = {}        
     
         # REVERSE EXECUTION
@@ -430,8 +422,8 @@ class SDSObjectHandler(BaseSDSHandler):
                 new_storlet_list[launch_key] = storlet_list[key]
 
         # Get storlet list to execute from proxy
-        if 'Storlet-List' in self.request.headers:
-            req_storlet_list = json.loads(self.request.headers['Storlet-List'])
+        if 'SDS-IOSTACK' in self.request.headers:
+            req_storlet_list = json.loads(self.request.headers.pop('SDS-IOSTACK'))
 
             for key in sorted(req_storlet_list):
                 storlet = req_storlet_list[key]['storlet']
@@ -446,13 +438,13 @@ class SDSObjectHandler(BaseSDSHandler):
         return new_storlet_list
 
     def _set_iostack_metadata(self):
-        iostack_metadata = {}
-        storlet_executed_list = json.loads(self.request.headers['Storlet-List'])
-        iostack_metadata["original-etag"] = self.request.headers['Original-Etag']
-        iostack_metadata["original-size"] = self.request.headers['Original-Size']
-        iostack_metadata["storlet-list"] = storlet_executed_list
+        iostack_md = {}
+        storlet_exec_list = json.loads(self.request.headers['Storlet-Executed-List'])
+        iostack_md["original-etag"] = self.request.headers['Original-Etag']
+        iostack_md["original-size"] = self.request.headers['Original-Size']
+        iostack_md["storlet-exec-list"] = storlet_exec_list
 
-        return iostack_metadata
+        return iostack_md
 
     def GET(self):
         """
@@ -463,24 +455,29 @@ class SDSObjectHandler(BaseSDSHandler):
         - Execute the storlets described in redis
         - Return the result
         """
-        original_resp = self.request.get_response(self.app)
+        resp = self.request.get_response(self.app)
         
-        iostack_metadata = sc.get_metadata(original_resp)
+        iostack_md = sc.get_metadata(resp)
         
-        if iostack_metadata:
-            original_resp.headers["ETag"] = iostack_metadata["original-etag"]
-            original_resp.headers["Content-Length"] = iostack_metadata["original-size"]
-            storlet_list = self._augment_storlet_list(iostack_metadata["storlet-list"])
+        if iostack_md:
+            resp.headers['ETag'] = iostack_md['original-etag']
+            resp.headers['Content-Length'] = iostack_md['original-size']
+        
+        storlet_execution_list = self._augment_storlet_execution_list(
+                                 iostack_md.get('storlet-exec-list',None))
+        
+        if storlet_execution_list:
             self._setup_storlet_gateway()
-            
-            return self.apply_storlet_on_get(original_resp, storlet_list)
+            return self.apply_storlet_on_get(resp, storlet_execution_list)
 
-        return original_resp
+        return resp
 
     def PUT(self):
         """
         PUT handler on Object
         """
+        # IF 'SDS-IOSTACK' is in headers, means that is needed to run a
+        # Storlet on object server before store the object.
         if 'SDS-IOSTACK' in self.request.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute')
             self._setup_storlet_gateway()
@@ -489,13 +486,19 @@ class SDSObjectHandler(BaseSDSHandler):
             self.apply_storlet_on_put(storlet_list)
         
         original_resp = self.request.get_response(self.app)
-
-        if 'Storlet-List' in self.request.headers:
+        
+        # 'Storlet-List' header is the list of all Storlets executed, both 
+        # on Proxy and on Object servers. It is necessary to save the list 
+        # in the extended metadata of the object for run reverse-Storlet on 
+        # GET requests.
+        if 'Storlet-Executed-List' in self.request.headers:
             iostack_metadata = self._set_iostack_metadata()
             if not sc.put_metadata(self.request, iostack_metadata, self.app):
                 self.app.logger.error('SDS Storlets - ERROR: Error writing'
                                       'metadata in an object')
                 # TODO: Rise exception writting metadata
+            # We need to restore the original ETAG to avoid checksum 
+            # verification of Swift clients
             original_resp.headers['ETag'] = iostack_metadata['original-etag']
         
         return original_resp

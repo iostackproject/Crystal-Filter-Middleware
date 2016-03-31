@@ -86,7 +86,7 @@ def write_metadata(fd, metadata, xattr_size=65536, md_key=None):
             raise
 
 
-def put_metadata(req, iostack_params, app):
+def put_metadata(req, iostack_md, app):
 
     get_req = req.copy_get()
     get_resp = get_req.get_response(app)
@@ -94,21 +94,23 @@ def put_metadata(req, iostack_params, app):
     fd = get_resp.app_iter._fp
     file_path = get_resp.app_iter._data_file.rsplit('/', 1)[0]
 
-    for key in iostack_params["storlet-list"]:
-        current_params = iostack_params["storlet-list"][key]['params']
+    for key in iostack_md["storlet-exec-list"]:
+        current_params = iostack_md["storlet-exec-list"][key]['params']
         if current_params:
-            iostack_params["storlet-list"][key]['params'] = current_params+','+'reverse=True'
+            iostack_md["storlet-exec-list"][key]['params'] = current_params+\
+                                                             ','+'reverse=True'
         else:
-            iostack_params["storlet-list"][key]['params'] = 'reverse=True'
+            iostack_md["storlet-exec-list"][key]['params'] = 'reverse=True'
         
-        iostack_params["storlet-list"][key]['execution_server'] = iostack_params["storlet-list"][key]['execution_server_reverse']
-        iostack_params["storlet-list"][key].pop('execution_server_reverse')
+        iostack_md["storlet-exec-list"][key]['execution_server'] = \
+            iostack_md["storlet-exec-list"][key]['execution_server_reverse']
+        iostack_md["storlet-exec-list"][key].pop('execution_server_reverse')
 
-    print (iostack_params)
+    print (iostack_md)
     print (file_path)
     
     try:
-        write_metadata(fd, iostack_params)
+        write_metadata(fd, iostack_md)
     except:
         return False
     return True
@@ -116,10 +118,9 @@ def put_metadata(req, iostack_params, app):
 
 def get_metadata(orig_resp):
     fd = orig_resp.app_iter._fp
-    try:
-        controller_md = read_metadata(fd)
-    except:
-        return None
+    controller_md = read_metadata(fd)
+    if not controller_md:
+        return {}
     return controller_md
 
 
