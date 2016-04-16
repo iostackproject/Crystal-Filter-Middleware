@@ -7,17 +7,19 @@ from swift.common.exceptions import DiskFileXattrNotSupported
 from swift.common.exceptions import DiskFileNoSpace
 from swift.obj.diskfile import _get_filename
 from swift.common.swob import Request
-import xattr
+import operator
 import logging
 import pickle
 import errno
+import xattr
 import os
 
 PICKLE_PROTOCOL = 2
 METADATA_KEY = 'user.swift.iostack'
 
-INTERNAL_CLIENT = '/etc/swift/storlet-proxy-server.conf'
-
+mappings = {'>': operator.gt, '>=': operator.ge,
+            '==': operator.eq, '<=': operator.le, '<': operator.lt,
+            '!=': operator.ne, "OR": operator.or_, "AND": operator.and_}
 
 def read_metadata(fd, md_key=None):
     """
@@ -117,8 +119,11 @@ def put_metadata(req, iostack_md, app):
 
 
 def get_metadata(orig_resp):
-    fd = orig_resp.app_iter._fp
-    controller_md = read_metadata(fd)
+    try:
+        fd = orig_resp.app_iter._fp
+        controller_md = read_metadata(fd)
+    except AttributeError as e:
+        print("Failed: Attempting to do a range request (non-supported): " + str(e))
     if not controller_md:
         return {}
     return controller_md

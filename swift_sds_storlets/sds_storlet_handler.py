@@ -3,28 +3,21 @@
 02-Mar-2016    josep.sampe     Code refactor
 21-Mar-2016    josep.sampe     Improved performance
 ==========================================================================='''
-import sds_storlet_gateway as vsg
-import sds_common as sc
-import ConfigParser
-import mimetypes
-import operator
-import redis
-import json
 from swift.proxy.controllers.base import get_account_info
 from swift.common.swob import HTTPInternalServerError
-from swift.common.swob import HTTPBadRequest
 from swift.common.swob import HTTPException
 from swift.common.swob import wsgify
 from swift.common.utils import config_true_value
 from swift.common.utils import get_logger
+import sds_storlet_gateway as sg
+import sds_storlet_common as sc
+import ConfigParser
+import mimetypes
+import redis
+import json
 
 
-mappings = {'>': operator.gt, '>=': operator.ge,
-            '==': operator.eq, '<=': operator.le, '<': operator.lt,
-            '!=': operator.ne, "OR": operator.or_, "AND": operator.and_}
-
-
-class NotSDSRequest(Exception):
+class NotSDSStorletRequest(Exception):
     pass
 
 
@@ -44,13 +37,13 @@ def _request_instance_property():
         try:
             self._extract_vaco()
         except ValueError:
-            raise NotSDSRequest()
+            raise NotSDSStorletRequest()
 
     return property(getter, setter,
                     doc="Force to tie the request to acc/con/obj vars")
 
 
-class BaseSDSHandler(object):
+class BaseSDSStorletHandler(object):
     """
     This is an abstract handler for Proxy/Object Server middleware
     """
@@ -62,6 +55,7 @@ class BaseSDSHandler(object):
         :param conf: gatway conf dict
         """
         self.request = request
+        self.server = conf.get('execution_server')
         self.sds_containers = [conf.get('storlet_container'),
                                conf.get('storlet_dependency')]
         self.app = app
@@ -72,16 +66,17 @@ class BaseSDSHandler(object):
         self.redis_port = conf.get('redis_port')
         self.redis_db = conf.get('redis_db')
         
+        self.method = self.request.method.lower()
+        
         self.redis_connection = redis.StrictRedis(self.redis_host, 
                                                   self.redis_port, 
                                                   self.redis_db)
-        
+
         self.storlet_metadata={}
         
-        self.method = self.request.method.lower()
-
+        
     def _setup_storlet_gateway(self):
-        self.storlet_gateway = vsg.SDSGatewayStorlet(
+        self.storlet_gateway = sg.SDSGatewayStorlet(
             self.conf, self.logger, self.app, self.api_version,
             self.account, self.container, self.obj, self.request.method)
 
@@ -160,11 +155,9 @@ class BaseSDSHandler(object):
                                         self.app)['meta']
         storlets_enabled = account_meta.get('storlet-enabled',
                                             'False')
+
         if not config_true_value(storlets_enabled):
-            self.logger.debug('SDS Storlets - Account disabled for storlets')
-            return HTTPBadRequest('SDS Storlets -' +
-                                  'Account disabled for storlets',
-                                  request=self.request)
+            return True # TODO: CHANGE TO FALSE
 
         return True
 
@@ -208,10 +201,10 @@ class BaseSDSHandler(object):
         self.request.headers['Transfer-Encoding'] = 'chunked'
 
 
-class SDSProxyHandler(BaseSDSHandler):
+class SDSStorletProxyHandler(BaseSDSStorletHandler):
 
     def __init__(self, request, conf, app, logger):        
-        super(SDSProxyHandler, self).__init__(
+        super(SDSStorletProxyHandler, self).__init__(
             request, conf, app, logger)
 
         # Dynamic binding of policies
@@ -260,7 +253,7 @@ class SDSProxyHandler(BaseSDSHandler):
             object_size = storlet_metadata['object_size'].replace("'", "\"")
             object_size = json.loads(object_size)
 
-            op = mappings[object_size[0]]
+            op = sc.mappings[object_size[0]]
             obj_lenght = int(object_size[1])
 
             correct_size = op(int(self.request.headers['Content-Length']),
@@ -327,7 +320,8 @@ class SDSProxyHandler(BaseSDSHandler):
     def GET(self):
         """
         GET handler on Proxy
-        """        
+        """      
+
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
             storlet_exec_list = self._build_storlet_execution_list()
@@ -342,7 +336,7 @@ class SDSProxyHandler(BaseSDSHandler):
             storlet_exec_list = json.loads(resp.headers.pop('SDS-IOSTACK'))
             self._update_storlet_metadata(storlet_exec_list)
             return self.apply_storlet_on_get(resp, storlet_exec_list)
-  
+        
         return resp
 
     def PUT(self):
@@ -374,11 +368,13 @@ class SDSProxyHandler(BaseSDSHandler):
         return self.request.get_response(self.app)
 
 
-class SDSObjectHandler(BaseSDSHandler):
+class SDSStorletObjectHandler(BaseSDSStorletHandler):
 
     def __init__(self, request, conf, app, logger):
-        super(SDSObjectHandler, self).__init__(
-            request, conf, app, logger)        
+        super(SDSStorletObjectHandler, self).__init__(
+            request, conf, app, logger) 
+        
+        self.device = self.request.environ['PATH_INFO'].split('/',2)[1]
 
     def _parse_vaco(self):
         _, _, acc, cont, obj = self.request.split_path(
@@ -394,18 +390,13 @@ class SDSObjectHandler(BaseSDSHandler):
         return self.request.params.get('multipart-manifest') == 'get'
 
     def handle_request(self):
-        if self.is_account_storlet_enabled():
-            if hasattr(self, self.request.method):
-                return getattr(self, self.request.method)()
-            else:
-                return self.request.get_response(self.app)
-                # un-defined method should be NOT ALLOWED
-                # return HTTPMethodNotAllowed(request=self.request)
+        if hasattr(self, self.request.method):
+            return getattr(self, self.request.method)()
         else:
-            self.logger.info('SDS Storlets - Account disabled for Storlets')
             return self.request.get_response(self.app)
-            
-
+            # un-defined method should be NOT ALLOWED
+            # return HTTPMethodNotAllowed(request=self.request)
+         
     def _augment_storlet_execution_list(self, storlet_list):
         new_storlet_list = {}        
     
@@ -469,21 +460,25 @@ class SDSObjectHandler(BaseSDSHandler):
         if storlet_execution_list:
             self._setup_storlet_gateway()
             return self.apply_storlet_on_get(resp, storlet_execution_list)
-
+        
         return resp
-
+               
     def PUT(self):
         """
-        PUT handler on Object
+        PUT handler on Object Server
         """
         # IF 'SDS-IOSTACK' is in headers, means that is needed to run a
-        # Storlet on object server before store the object.
+        # Storlet on Object Server before store the object.
         if 'SDS-IOSTACK' in self.request.headers:
             self.logger.info('SDS Storlets - There are Storlets to execute')
             self._setup_storlet_gateway()
             storlet_list = json.loads(self.request.headers['SDS-IOSTACK'])
             self._update_storlet_metadata(storlet_list)
             self.apply_storlet_on_put(storlet_list)
+        
+        ''' BANDWIDTH CONTROL '''
+        if self.conf.get('bandwidth_control') == 'object': 
+            self.bwc.register_request(self.account,self.request)
         
         original_resp = self.request.get_response(self.app)
         
@@ -500,16 +495,16 @@ class SDSObjectHandler(BaseSDSHandler):
             # We need to restore the original ETAG to avoid checksum 
             # verification of Swift clients
             original_resp.headers['ETag'] = iostack_metadata['original-etag']
-        
+                
         return original_resp
 
 
-class SDSHandlerMiddleware(object):
+class SDSStorletHandlerMiddleware(object):
 
     def __init__(self, app, conf, sds_conf):
         self.app = app
         self.exec_server = sds_conf.get('execution_server')
-        self.logger = get_logger(conf, log_route='sds_handler')
+        self.logger = get_logger(conf, log_route='sds_storlet_handler')
         self.sds_conf = sds_conf
         self.containers = [sds_conf.get('storlet_container'),
                            sds_conf.get('storlet_dependency')]
@@ -517,9 +512,9 @@ class SDSHandlerMiddleware(object):
         
     def _get_handler(self, exec_server):
         if exec_server == 'proxy':
-            return SDSProxyHandler
+            return SDSStorletProxyHandler
         elif exec_server == 'object':
-            return SDSObjectHandler
+            return SDSStorletObjectHandler
         else:
             raise ValueError('configuration error: execution_server must'
                 ' be either proxy or object but is %s' % exec_server)
@@ -529,13 +524,13 @@ class SDSHandlerMiddleware(object):
         try:
             request_handler = self.handler_class(
                 req, self.sds_conf, self.app, self.logger)
-            self.logger.debug('sds_handler call in %s: with %s/%s/%s' %
+            self.logger.debug('sds_storlet_handler call in %s: with %s/%s/%s' %
                               (self.exec_server, request_handler.account,
                                request_handler.container,
                                request_handler.obj))
         except HTTPException:
             raise
-        except NotSDSRequest:
+        except NotSDSStorletRequest:
             return req.get_response(self.app)
 
         try:
@@ -550,6 +545,7 @@ class SDSHandlerMiddleware(object):
 
 def filter_factory(global_conf, **local_conf):
     """Standard filter factory to use the middleware with paste.deploy"""
+    
     conf = global_conf.copy()
     conf.update(local_conf)
 
@@ -565,7 +561,7 @@ def filter_factory(global_conf, **local_conf):
                                              'storlet')
     sds_conf['storlet_dependency'] = conf.get('storlet_dependency',
                                               'dependency')
-    sds_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')
+    sds_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')  
 
     configParser = ConfigParser.RawConfigParser()
     configParser.read(conf.get('storlet_gateway_conf',
@@ -575,7 +571,7 @@ def filter_factory(global_conf, **local_conf):
     for key, val in additional_items:
         sds_conf[key] = val
 
-    def swift_sds(app):
-        return SDSHandlerMiddleware(app, conf, sds_conf)
+    def swift_sds_storlets(app):
+        return SDSStorletHandlerMiddleware(app, conf, sds_conf)
 
-    return swift_sds
+    return swift_sds_storlets
