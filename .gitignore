@@ -58,3 +58,4 @@ target/
 /deploy_middleware.py
 /.project
 /.pydevproject
+/copy_middleware.sh
