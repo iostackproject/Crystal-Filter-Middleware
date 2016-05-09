@@ -1,18 +1,15 @@
 '''===========================================================================
 19-Oct-2015    josep.sampe    Initial implementation.
 ==========================================================================='''
-from swift.common.internal_client import InternalClient as ic
 from swift.common.exceptions import DiskFileNotExist
 from swift.common.exceptions import DiskFileXattrNotSupported
 from swift.common.exceptions import DiskFileNoSpace
 from swift.obj.diskfile import _get_filename
-from swift.common.swob import Request
 import operator
 import logging
 import pickle
 import errno
 import xattr
-import os
 
 PICKLE_PROTOCOL = 2
 METADATA_KEY = 'user.swift.iostack'
@@ -117,7 +114,6 @@ def put_metadata(req, iostack_md, app):
         return False
     return True
 
-
 def get_metadata(orig_resp):
     try:
         fd = orig_resp.app_iter._fp
@@ -127,32 +123,3 @@ def get_metadata(orig_resp):
     if not controller_md:
         return {}
     return controller_md
-
-
-def make_swift_request(op, account, container=None, obj=None):
-    iclient = ic(INTERNAL_CLIENT, 'SA', 1)
-    path = iclient.make_path(account, container, obj)
-    resp = iclient.make_request(op, path, {'PATH_INFO': path}, [200])
-    return resp
-
-
-def verify_access(self, env, ver, account, container, obj):
-    self.logger.info('Verify access to {0}/{1}/{2}'.format(account,
-                                                           container,
-                                                           obj))
-    new_env = env.copy()
-    if 'HTTP_TRANSFER_ENCODING' in new_env.keys():
-        del new_env['HTTP_TRANSFER_ENCODING']
-    new_env['REQUEST_METHOD'] = 'HEAD'
-    new_env['swift.source'] = 'CM'
-    new_env['PATH_INFO'] = os.path.join('/' + ver, account, container, obj)
-    new_env['RAW_PATH_INFO'] = os.path.join('/' + ver, account, container, obj)
-    req = Request.blank(new_env['PATH_INFO'], new_env)
-
-    if 'X-Vertigo-Onget' in req.headers:
-        req.headers.pop('X-Vertigo-Onget')
-
-    resp = req.get_response(self.app)
-    if resp.status_int < 300 and resp.status_int >= 200:
-        return True
-    return False
