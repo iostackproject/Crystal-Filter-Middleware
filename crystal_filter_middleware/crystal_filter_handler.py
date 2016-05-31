@@ -1,7 +1,8 @@
 '''===========================================================================
 29-Sep-2015    edgar.zamora    Initial implementation.
-02-Mar-2016    josep.sampe     Code refactor
+02-Mar-2016    josep.sampe     Code refactor, New functionalities
 21-Mar-2016    josep.sampe     Improved performance
+31-May-2016    josep.sampe     Storlet middleware -> Crystal filter middleware
 ==========================================================================='''
 from swift.proxy.controllers.base import get_account_info
 from swift.common.swob import HTTPInternalServerError
@@ -9,8 +10,9 @@ from swift.common.swob import HTTPException
 from swift.common.swob import wsgify
 from swift.common.utils import config_true_value
 from swift.common.utils import get_logger
-import sds_storlet_gateway as sg
-import sds_storlet_common as sc
+from sds_cache import BlockCache
+import crystal_filter_storlet_gateway as sg
+import crystal_filter_common as sc
 import ConfigParser
 import mimetypes
 import redis
@@ -65,6 +67,7 @@ class BaseSDSStorletHandler(object):
         self.redis_host = conf.get('redis_host')
         self.redis_port = conf.get('redis_port')
         self.redis_db = conf.get('redis_db')
+        self.cache = conf.get('cache')
         
         self.method = self.request.method.lower()
         
@@ -320,8 +323,8 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
     def GET(self):
         """
         GET handler on Proxy
-        """      
-
+        """    
+        
         if self.storlet_list:
             self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
             storlet_exec_list = self._build_storlet_execution_list()
@@ -336,9 +339,9 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
             storlet_exec_list = json.loads(resp.headers.pop('SDS-IOSTACK'))
             self._update_storlet_metadata(storlet_exec_list)
             return self.apply_storlet_on_get(resp, storlet_exec_list)
-        
-        return resp
 
+        return resp
+    
     def PUT(self):
         """
         PUT handler on Proxy
@@ -509,6 +512,9 @@ class SDSStorletHandlerMiddleware(object):
         self.containers = [sds_conf.get('storlet_container'),
                            sds_conf.get('storlet_dependency')]
         self.handler_class = self._get_handler(self.exec_server)
+        
+        if self.exec_server == 'proxy':
+            self.sds_conf['cache'] = BlockCache()
         
     def _get_handler(self, exec_server):
         if exec_server == 'proxy':

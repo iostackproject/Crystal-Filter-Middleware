@@ -18,6 +18,7 @@ mappings = {'>': operator.gt, '>=': operator.ge,
             '==': operator.eq, '<=': operator.le, '<': operator.lt,
             '!=': operator.ne, "OR": operator.or_, "AND": operator.and_}
 
+
 def read_metadata(fd, md_key=None):
     """
     Helper function to read the pickled metadata from an object file.
@@ -115,6 +116,7 @@ def put_metadata(req, iostack_md, app):
     return True
 
 def get_metadata(orig_resp):
+    controller_md = {} 
     try:
         fd = orig_resp.app_iter._fp
         controller_md = read_metadata(fd)

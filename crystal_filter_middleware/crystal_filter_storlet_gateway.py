@@ -60,10 +60,10 @@ class SDSGatewayStorlet():
                                             self.obj, req_resp,
                                             input_pipe)
 
-        return app_iter.obj_data, app_iter
+        return app_iter
 
     def execute_storlet(self, req_resp, storlet_list, storlet_md):
-        out_fd = None
+        app_iter = None
         storlet_executed = False
         on_other_server = {}
         
@@ -81,10 +81,8 @@ class SDSGatewayStorlet():
             if server == self.server:
                 self.logger.info('SDS Storlets - Go to execute ' + storlet +
                                  ' storlet with parameters "' + params + '"')
-
-                out_fd, app_iter = self.launch_storlet(req_resp,
-                                                       params, 
-                                                       out_fd)
+                        
+                app_iter = self.launch_storlet(req_resp, params, app_iter)
                 storlet_executed = True
             else:
                 storlet_execution = {'storlet': storlet,
@@ -92,7 +90,7 @@ class SDSGatewayStorlet():
                                      'execution_server': server,
                                      'id': storlet_id}
                 on_other_server[key] = storlet_execution
-        
+
         if on_other_server:
             req_resp.headers['SDS-IOSTACK'] = json.dumps(on_other_server)
         
