@@ -86,7 +86,7 @@ def write_metadata(fd, metadata, xattr_size=65536, md_key=None):
             raise
 
 
-def put_metadata(req, iostack_md, app):
+def put_metadata(app, req, crystal_md):
 
     get_req = req.copy_get()
     get_resp = get_req.get_response(app)
@@ -94,23 +94,27 @@ def put_metadata(req, iostack_md, app):
     fd = get_resp.app_iter._fp
     file_path = get_resp.app_iter._data_file.rsplit('/', 1)[0]
 
-    for key in iostack_md["storlet-exec-list"]:
-        current_params = iostack_md["storlet-exec-list"][key]['params']
-        if current_params:
-            iostack_md["storlet-exec-list"][key]['params'] = current_params+\
-                                                             ','+'reverse=True'
-        else:
-            iostack_md["storlet-exec-list"][key]['params'] = 'reverse=True'
+    for key in crystal_md["filter-exec-list"].keys():
         
-        iostack_md["storlet-exec-list"][key]['execution_server'] = \
-            iostack_md["storlet-exec-list"][key]['execution_server_reverse']
-        iostack_md["storlet-exec-list"][key].pop('execution_server_reverse')
+        cfilter = crystal_md["filter-exec-list"][key]
+        current_params = cfilter['params']
+        
+        if cfilter['has_reverse']:
+            if current_params:
+                cfilter['params'] = current_params+','+'reverse=True'
+            else:
+                cfilter['params'] = 'reverse=True'
 
-    print (iostack_md)
+            cfilter['execution_server'] = cfilter['execution_server_reverse']
+            cfilter.pop('execution_server_reverse')
+        else:
+            crystal_md["filter-exec-list"].pop(key)
+
+    print (crystal_md)
     print (file_path)
     
     try:
-        write_metadata(fd, iostack_md)
+        write_metadata(fd, crystal_md)
     except:
         return False
     return True

@@ -10,8 +10,7 @@ from swift.common.swob import HTTPException
 from swift.common.swob import wsgify
 from swift.common.utils import config_true_value
 from swift.common.utils import get_logger
-from sds_cache import BlockCache
-import crystal_filter_storlet_gateway as sg
+from crystal_filter_control import CrystalFilterControl
 import crystal_filter_common as sc
 import ConfigParser
 import mimetypes
@@ -19,7 +18,7 @@ import redis
 import json
 
 
-class NotSDSStorletRequest(Exception):
+class NotSDSFilterRequest(Exception):
     pass
 
 
@@ -39,22 +38,22 @@ def _request_instance_property():
         try:
             self._extract_vaco()
         except ValueError:
-            raise NotSDSStorletRequest()
+            raise NotSDSFilterRequest()
 
     return property(getter, setter,
                     doc="Force to tie the request to acc/con/obj vars")
 
 
-class BaseSDSStorletHandler(object):
+class BaseSDSFilterHandler(object):
     """
     This is an abstract handler for Proxy/Object Server middleware
     """
     request = _request_instance_property()
 
-    def __init__(self, request, conf, app, logger):
+    def __init__(self, request, conf, app, logger, filter_control):
         """
         :param request: swob.Request instance
-        :param conf: gatway conf dict
+        :param conf: gateway conf dict
         """
         self.request = request
         self.server = conf.get('execution_server')
@@ -63,6 +62,7 @@ class BaseSDSStorletHandler(object):
         self.app = app
         self.logger = logger
         self.conf = conf
+        self.filter_control = filter_control
         
         self.redis_host = conf.get('redis_host')
         self.redis_port = conf.get('redis_port')
@@ -74,14 +74,7 @@ class BaseSDSStorletHandler(object):
         self.redis_connection = redis.StrictRedis(self.redis_host, 
                                                   self.redis_port, 
                                                   self.redis_db)
-
-        self.storlet_metadata={}
         
-        
-    def _setup_storlet_gateway(self):
-        self.storlet_gateway = sg.SDSGatewayStorlet(
-            self.conf, self.logger, self.app, self.api_version,
-            self.account, self.container, self.obj, self.request.method)
 
     def _extract_vaco(self):
         """
@@ -164,64 +157,58 @@ class BaseSDSStorletHandler(object):
 
         return True
 
-    def _call_storlet_gateway_on_put(self, storlet_list):
+    def _call_filter_control_on_put(self, filter_list):
         """
-        Call gateway module to get result of storlet execution
+        Call gateway module to get result of filter execution
         in PUT flow
         """
-        return self.storlet_gateway.execute_storlet(self.request, storlet_list, 
-                                                    self.storlet_metadata)
+        return self.filter_control.execute_filters(self.request, filter_list,
+                                                   self.conf, self.logger, 
+                                                   self.app, self._api_version, 
+                                                   self.account, self.container, 
+                                                   self.obj, self.method)
 
-    def _call_storlet_gateway_on_get(self, resp, storlet_list):
+    def _call_filter_control_on_get(self, resp, filter_list):
         """
-        Call gateway module to get result of storlet execution
+        Call gateway module to get result of filter execution
         in GET flow
         """
-        return self.storlet_gateway.execute_storlet(resp, storlet_list,
-                                                    self.storlet_metadata)
+        return self.filter_control.execute_filters(resp, filter_list,
+                                                   self.conf, self.logger, 
+                                                   self.app, self._api_version, 
+                                                   self.account, self.container, 
+                                                   self.obj, self.method)
 
-    
-    def _update_storlet_metadata(self, storlet_execution_list):
-        general_metadata = {}
-        
-        for key in storlet_execution_list:
-            storlet = storlet_execution_list[key]['storlet']
-            if not storlet in self.storlet_metadata.keys():    
-                storlet_id = storlet_execution_list[key]["id"]
-                general_metadata[storlet] = self.redis_connection.hgetall(
-                                            "storlet:" + storlet_id)
+    def apply_filters_on_get(self, resp, filter_list):
+        return self._call_filter_control_on_get(resp, filter_list)
 
-        self.storlet_metadata.update(general_metadata)
-
-    def apply_storlet_on_get(self, resp, storlet_list):
-        return self._call_storlet_gateway_on_get(resp, storlet_list)
-
-    def apply_storlet_on_put(self, storlet_list):
-        self.request = self._call_storlet_gateway_on_put(storlet_list)
+    def apply_filters_on_put(self, filter_list):
+        self.request = self._call_filter_control_on_put(filter_list)
 
         if 'CONTENT_LENGTH' in self.request.environ:
             self.request.environ.pop('CONTENT_LENGTH')
         self.request.headers['Transfer-Encoding'] = 'chunked'
 
 
-class SDSStorletProxyHandler(BaseSDSStorletHandler):
+class SDSFilterProxyHandler(BaseSDSFilterHandler):
 
-    def __init__(self, request, conf, app, logger):        
-        super(SDSStorletProxyHandler, self).__init__(
-            request, conf, app, logger)
+    def __init__(self, request, conf, app, logger, filter_control):        
+        super(SDSFilterProxyHandler, self).__init__(request, conf, 
+                                                    app, logger,
+                                                    filter_control)
 
         # Dynamic binding of policies
         account_key_list = self.redis_connection.keys("pipeline:"+
                                                       str(self.account)+ 
                                                       "*")
 
-        self.storlet_list = None
+        self.filter_list = None
         key = self.account + "/" + self.container + "/" + self.obj
         for target in range(3):
             self.target_key = key.rsplit("/", target)[0]
             if 'pipeline:' + self.target_key in account_key_list:
-                self.storlet_list = self.redis_connection.lrange(
-                    'pipeline:' + self.target_key, 0, -1)[::-1]
+                self.filter_list = self.redis_connection.hgetall(
+                    'pipeline:' + self.target_key)
                 break
 
     def _parse_vaco(self):
@@ -242,20 +229,18 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
              self.conf['storlet_execute_on_proxy_only']])
         return runnable
 
-    def check_size_type(self, storlet_metadata):
+    def check_size_type(self, filter_metadata):
 
         correct_type = True
         correct_size = True
-
-        if 'object_type' in storlet_metadata:
-            obj_type = storlet_metadata['object_type']
+        
+        if filter_metadata['object_type']:
+            obj_type = filter_metadata['object_type']
             correct_type = self._get_object_type() in \
                 self.redis_connection.lrange("object_type:"+obj_type, 0, -1)
             
-        if 'object_size' in storlet_metadata:
-            object_size = storlet_metadata['object_size'].replace("'", "\"")
-            object_size = json.loads(object_size)
-
+        if filter_metadata['object_size']:
+            object_size = filter_metadata['object_size']
             op = sc.mappings[object_size[0]]
             obj_lenght = int(object_size[1])
 
@@ -282,63 +267,59 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
             self.logger.info('SDS Storlets - Account disabled for Storlets')
             return self.request.get_response(self.app)
         
-    def _build_storlet_execution_list(self):
-        general_metadata = {}
-        specific_metadata = {}
-        storlet_execution_list = {}
+    def _build_filter_execution_list(self):
+        filter_execution_list = dict()
         
-        for storlet in self.storlet_list:
-            specific_metadata[storlet] = self.redis_connection.hgetall(
-                str(self.target_key) + ":" + str(storlet))
+        for _, filter_metadata in self.filter_list.items():            
+            filter_metadata = json.loads(filter_metadata)
 
-            storlet_id = specific_metadata[storlet]["id"]
-            
-            general_metadata[storlet] = self.redis_connection.hgetall(
-                                                "storlet:" + storlet_id)
-            
-            # Merge both dictionaries
-            general_metadata[storlet].update(specific_metadata[storlet])
-
-            # Chek conditions
-            if general_metadata[storlet]["is_" + self.method] == "True":
-                if self.check_size_type(specific_metadata[storlet]):
-                
-                    server = general_metadata[storlet]["execution_server"]
-                    reverse = general_metadata[storlet]["execution_server_reverse"]
-                    params = general_metadata[storlet]["params"]
-
-                    storlet_execution = {'storlet': storlet,
-                                         'params': params,
-                                         'execution_server': server,
-                                         'execution_server_reverse': reverse,
-                                         'id': storlet_id}
+            # Check conditions
+            if filter_metadata["is_" + self.method]:
+                if self.check_size_type(filter_metadata):
+                    filter_name = filter_metadata['name']
+                    server = filter_metadata["execution_server"]
+                    reverse = filter_metadata["execution_server_reverse"]
+                    params = filter_metadata["params"]
+                    filter_id = filter_metadata["filter_id"]
+                    filter_type = 'storlet' #filter_metadata["filter_type"]
+                    filter_main = filter_metadata["main"]
+                    filter_dependencies = filter_metadata["dependencies"]
+                    filter_size = filter_metadata["content_length"]
+                    has_reverse = filter_metadata["has_reverse"]
                     
-                    launch_key = len(storlet_execution_list.keys())
-                    storlet_execution_list[launch_key] = storlet_execution
-        
-        self.storlet_metadata = general_metadata
+                    filter_execution = {'name': filter_name,
+                                        'params': params,
+                                        'execution_server': server,
+                                        'execution_server_reverse': reverse,
+                                        'id': filter_id,
+                                        'type': filter_type,
+                                        'main': filter_main,
+                                        'dependencies': filter_dependencies,
+                                        'size': filter_size,
+                                        'has_reverse': has_reverse}
+                   
+                    launch_key = filter_metadata["execution_order"]
+                    filter_execution_list[launch_key] = filter_execution
 
-        return storlet_execution_list
+        return filter_execution_list
 
     def GET(self):
         """
         GET handler on Proxy
         """    
         
-        if self.storlet_list:
-            self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
-            storlet_exec_list = self._build_storlet_execution_list()
-            self.request.headers['SDS-IOSTACK'] = json.dumps(storlet_exec_list)
+        if self.filter_list:
+            self.app.logger.info('Crystal Filters - ' + str(self.filter_list))
+            filter_exec_list = self._build_filter_execution_list()
+            self.request.headers['CRYSTAL-FILTERS'] = json.dumps(filter_exec_list)
 
         resp = self.request.get_response(self.app)
         
-        if 'SDS-IOSTACK' in resp.headers:
-            self.logger.info('SDS Storlets - There are Storlets to execute '
+        if 'CRYSTAL-FILTERS' in resp.headers:
+            self.logger.info('Crystal Filters - There are filters to execute '
                              'from object server')
-            self._setup_storlet_gateway()
-            storlet_exec_list = json.loads(resp.headers.pop('SDS-IOSTACK'))
-            self._update_storlet_metadata(storlet_exec_list)
-            return self.apply_storlet_on_get(resp, storlet_exec_list)
+            filter_exec_list = json.loads(resp.headers.pop('CRYSTAL-FILTERS'))
+            return self.apply_filters_on_get(resp, filter_exec_list)
 
         return resp
     
@@ -346,11 +327,11 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
         """
         PUT handler on Proxy
         """
-        if self.storlet_list:
-            self.app.logger.info('SDS Storlets - ' + str(self.storlet_list))
-            storlet_execution_list = self._build_storlet_execution_list()
-            if storlet_execution_list:
-                self.request.headers['Storlet-Executed-List'] = json.dumps(storlet_execution_list)
+        if self.filter_list:
+            self.app.logger.info('Crystal Filters - ' + str(self.filter_list))
+            filter_exec_list = self._build_filter_execution_list()
+            if filter_exec_list:
+                self.request.headers['Filter-Executed-List'] = json.dumps(filter_exec_list)
                 self.request.headers['Original-Size'] = self.request.headers.get('Content-Length','')
                 self.request.headers['Original-Etag'] = self.request.headers.get('ETag','')
                 
@@ -359,23 +340,23 @@ class SDSStorletProxyHandler(BaseSDSStorletHandler):
                     # delete the Etag from request headers to prevent checksum
                     # verification.
                     self.request.headers.pop('ETag')
-                
-                self._setup_storlet_gateway()
-                self.apply_storlet_on_put(storlet_execution_list)
-                
+
+                self.apply_filters_on_put(filter_exec_list)
+
             else:
-                self.logger.info('SDS Storlets - No Storlets to execute')
+                self.logger.info('Crystal Filters - No filters to execute')
         else:
-            self.logger.info('SDS Storlets - No Storlets to execute')
+            self.logger.info('Crystal Filters - No filters to execute')
         
         return self.request.get_response(self.app)
 
 
-class SDSStorletObjectHandler(BaseSDSStorletHandler):
+class SDSFilterObjectHandler(BaseSDSFilterHandler):
 
-    def __init__(self, request, conf, app, logger):
-        super(SDSStorletObjectHandler, self).__init__(
-            request, conf, app, logger) 
+    def __init__(self, request, conf, app, logger,filter_control):
+        super(SDSFilterObjectHandler, self).__init__(request, conf, 
+                                                     app, logger,
+                                                     filter_control) 
         
         self.device = self.request.environ['PATH_INFO'].split('/',2)[1]
 
@@ -400,43 +381,31 @@ class SDSStorletObjectHandler(BaseSDSStorletHandler):
             # un-defined method should be NOT ALLOWED
             # return HTTPMethodNotAllowed(request=self.request)
          
-    def _augment_storlet_execution_list(self, storlet_list):
+    def _augment_filter_execution_list(self, filter_list):
         new_storlet_list = {}        
     
         # REVERSE EXECUTION
-        if storlet_list:            
-            for key in reversed(sorted(storlet_list)):
-                storlet = storlet_list[key]['storlet']
-                storlet_id = storlet_list[key]['id']
-
-                self.storlet_metadata[storlet] = self.redis_connection.hgetall(
-                                                 "storlet:"+storlet_id)
-                
+        if filter_list:            
+            for key in reversed(sorted(filter_list)):
                 launch_key = len(new_storlet_list.keys())
-                new_storlet_list[launch_key] = storlet_list[key]
+                new_storlet_list[launch_key] = filter_list[key]
 
-        # Get storlet list to execute from proxy
-        if 'SDS-IOSTACK' in self.request.headers:
-            req_storlet_list = json.loads(self.request.headers.pop('SDS-IOSTACK'))
+        # Get filter list to execute from proxy
+        if 'CRYSTAL-FILTERS' in self.request.headers:
+            req_filter_list = json.loads(self.request.headers.pop('CRYSTAL-FILTERS'))
 
-            for key in sorted(req_storlet_list):
-                storlet = req_storlet_list[key]['storlet']
-                storlet_id = req_storlet_list[key]['id']
-
-                self.storlet_metadata[storlet] = self.redis_connection.hgetall(
-                                                 "storlet:"+storlet_id)
-                
+            for key in sorted(req_filter_list):
                 launch_key = len(new_storlet_list.keys())
-                new_storlet_list[launch_key] = req_storlet_list[key]
+                new_storlet_list[launch_key] = req_filter_list[key]
         
         return new_storlet_list
 
-    def _set_iostack_metadata(self):
+    def _set_crystal_metadata(self):
         iostack_md = {}
-        storlet_exec_list = json.loads(self.request.headers['Storlet-Executed-List'])
+        filter_exec_list = json.loads(self.request.headers['Filter-Executed-List'])
         iostack_md["original-etag"] = self.request.headers['Original-Etag']
         iostack_md["original-size"] = self.request.headers['Original-Size']
-        iostack_md["storlet-exec-list"] = storlet_exec_list
+        iostack_md["filter-exec-list"] = filter_exec_list
 
         return iostack_md
 
@@ -457,12 +426,11 @@ class SDSStorletObjectHandler(BaseSDSStorletHandler):
             resp.headers['ETag'] = iostack_md['original-etag']
             resp.headers['Content-Length'] = iostack_md['original-size']
         
-        storlet_execution_list = self._augment_storlet_execution_list(
-                                 iostack_md.get('storlet-exec-list',None))
+        filter_exec_list = self._augment_filter_execution_list(
+                                 iostack_md.get('filter-exec-list',None))
         
-        if storlet_execution_list:
-            self._setup_storlet_gateway()
-            return self.apply_storlet_on_get(resp, storlet_execution_list)
+        if filter_exec_list:
+            return self.apply_filters_on_get(resp, filter_exec_list)
         
         return resp
                
@@ -470,18 +438,12 @@ class SDSStorletObjectHandler(BaseSDSStorletHandler):
         """
         PUT handler on Object Server
         """
-        # IF 'SDS-IOSTACK' is in headers, means that is needed to run a
-        # Storlet on Object Server before store the object.
-        if 'SDS-IOSTACK' in self.request.headers:
-            self.logger.info('SDS Storlets - There are Storlets to execute')
-            self._setup_storlet_gateway()
-            storlet_list = json.loads(self.request.headers['SDS-IOSTACK'])
-            self._update_storlet_metadata(storlet_list)
-            self.apply_storlet_on_put(storlet_list)
-        
-        ''' BANDWIDTH CONTROL '''
-        if self.conf.get('bandwidth_control') == 'object': 
-            self.bwc.register_request(self.account,self.request)
+        # IF 'CRYSTAL-FILTERS' is in headers, means that is needed to run a
+        # Filter on Object Server before store the object.
+        if 'CRYSTAL-FILTERS' in self.request.headers:
+            self.logger.info('Crystal Filters - There are filters to execute')
+            filter_list = json.loads(self.request.headers['CRYSTAL-FILTERS'])
+            self.apply_filters_on_put(filter_list)
         
         original_resp = self.request.get_response(self.app)
         
@@ -489,38 +451,40 @@ class SDSStorletObjectHandler(BaseSDSStorletHandler):
         # on Proxy and on Object servers. It is necessary to save the list 
         # in the extended metadata of the object for run reverse-Storlet on 
         # GET requests.
-        if 'Storlet-Executed-List' in self.request.headers:
-            iostack_metadata = self._set_iostack_metadata()
-            if not sc.put_metadata(self.request, iostack_metadata, self.app):
-                self.app.logger.error('SDS Storlets - ERROR: Error writing'
+        if 'Filter-Executed-List' in self.request.headers:
+            crystal_metadata = self._set_crystal_metadata()
+            if not sc.put_metadata(self.app, self.request, crystal_metadata):
+                self.app.logger.error('Crystal Filters - Error writing'
                                       'metadata in an object')
                 # TODO: Rise exception writting metadata
             # We need to restore the original ETAG to avoid checksum 
             # verification of Swift clients
-            original_resp.headers['ETag'] = iostack_metadata['original-etag']
+            original_resp.headers['ETag'] = crystal_metadata['original-etag']
                 
         return original_resp
 
 
-class SDSStorletHandlerMiddleware(object):
+class SDSFilterHandlerMiddleware(object):
 
-    def __init__(self, app, conf, sds_conf):
+    def __init__(self, app, conf, crystal_conf):
         self.app = app
-        self.exec_server = sds_conf.get('execution_server')
+        self.conf = crystal_conf
         self.logger = get_logger(conf, log_route='sds_storlet_handler')
-        self.sds_conf = sds_conf
-        self.containers = [sds_conf.get('storlet_container'),
-                           sds_conf.get('storlet_dependency')]
+        self.exec_server = self.conf.get('execution_server')
+        self.containers = [self.conf.get('storlet_container'),
+                           self.conf.get('storlet_dependency')]
         self.handler_class = self._get_handler(self.exec_server)
         
-        if self.exec_server == 'proxy':
-            self.sds_conf['cache'] = BlockCache()
+        ''' Singleton instance of filter control '''
+        self.control_class = CrystalFilterControl
+        self.filter_control =  self.control_class.Instance(conf = self.conf,
+                                                           log = self.logger)
         
     def _get_handler(self, exec_server):
         if exec_server == 'proxy':
-            return SDSStorletProxyHandler
+            return SDSFilterProxyHandler
         elif exec_server == 'object':
-            return SDSStorletObjectHandler
+            return SDSFilterObjectHandler
         else:
             raise ValueError('configuration error: execution_server must'
                 ' be either proxy or object but is %s' % exec_server)
@@ -528,25 +492,26 @@ class SDSStorletHandlerMiddleware(object):
     @wsgify
     def __call__(self, req):
         try:
-            request_handler = self.handler_class(
-                req, self.sds_conf, self.app, self.logger)
-            self.logger.debug('sds_storlet_handler call in %s: with %s/%s/%s' %
+            request_handler = self.handler_class(req, self.conf, 
+                                                 self.app, self.logger,
+                                                 self.filter_control)
+            self.logger.debug('crystal_filter_handler call in %s: with %s/%s/%s' %
                               (self.exec_server, request_handler.account,
                                request_handler.container,
                                request_handler.obj))
         except HTTPException:
             raise
-        except NotSDSStorletRequest:
+        except NotSDSFilterRequest:
             return req.get_response(self.app)
 
         try:
             return request_handler.handle_request()
         except HTTPException:
-            self.logger.exception('SDS Storlets execution failed')
+            self.logger.exception('Crystal filter middleware execution failed')
             raise
         except Exception:
-            self.logger.exception('SDS Storlets execution failed')
-            raise HTTPInternalServerError(body='SDS Storlets execution failed')
+            self.logger.exception('Crystal filter middleware execution failed')
+            raise HTTPInternalServerError(body='Crystal filter middleware execution failed')
 
 
 def filter_factory(global_conf, **local_conf):
@@ -555,29 +520,32 @@ def filter_factory(global_conf, **local_conf):
     conf = global_conf.copy()
     conf.update(local_conf)
 
-    sds_conf = dict()
-    sds_conf['execution_server'] = conf.get('execution_server', 'object')
+    crystal_conf = dict()
+    crystal_conf['execution_server'] = conf.get('execution_server', 'object')
     
-    sds_conf['redis_host'] = conf.get('redis_host', 'controller')
-    sds_conf['redis_port'] = conf.get('redis_port', 6379)
-    sds_conf['redis_db'] = conf.get('redis_db', 0)
+    crystal_conf['redis_host'] = conf.get('redis_host', 'controller')
+    crystal_conf['redis_port'] = conf.get('redis_port', 6379)
+    crystal_conf['redis_db'] = conf.get('redis_db', 0)
 
-    sds_conf['storlet_timeout'] = conf.get('storlet_timeout', 40)
-    sds_conf['storlet_container'] = conf.get('storlet_container',
+    crystal_conf['storlet_timeout'] = conf.get('storlet_timeout', 40)
+    crystal_conf['storlet_container'] = conf.get('storlet_container',
                                              'storlet')
-    sds_conf['storlet_dependency'] = conf.get('storlet_dependency',
+    crystal_conf['storlet_dependency'] = conf.get('storlet_dependency',
                                               'dependency')
-    sds_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')  
+    crystal_conf['reseller_prefix'] = conf.get('reseller_prefix', 'AUTH')  
+    crystal_conf['bind_ip'] = conf.get('bind_ip')
+    crystal_conf['bind_port'] = conf.get('bind_port')
+
 
     configParser = ConfigParser.RawConfigParser()
     configParser.read(conf.get('storlet_gateway_conf',
                                '/etc/swift/storlet_docker_gateway.conf'))
-
     additional_items = configParser.items("DEFAULT")
+
     for key, val in additional_items:
-        sds_conf[key] = val
+        crystal_conf[key] = val
 
     def swift_sds_storlets(app):
-        return SDSStorletHandlerMiddleware(app, conf, sds_conf)
+        return SDSFilterHandlerMiddleware(app, conf, crystal_conf)
 
     return swift_sds_storlets

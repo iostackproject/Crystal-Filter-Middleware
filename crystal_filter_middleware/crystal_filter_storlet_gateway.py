@@ -4,10 +4,8 @@
 01-Mar-2016    josep.sampe    Addded pipeline (multi-node)
 22-Mar-2016    josep.sampe    Enhanced performance
 ==========================================================================='''
-from swift.common.swob import Request
 from storlet_gateway.storlet_docker_gateway import StorletGatewayDocker
-import json
-
+from swift.common.swob import Request
 
 class SDSGatewayStorlet():
 
@@ -40,8 +38,8 @@ class SDSGatewayStorlet():
         md = {}
         md['X-Object-Meta-Storlet-Main'] = self.storlet_metadata['main']
         md['X-Object-Meta-Storlet-Dependency'] = self.storlet_metadata['dependencies']
-        md['Content-Length'] = self.storlet_metadata['content_length']
-        md['ETag'] = self.storlet_metadata['etag']
+        md['Content-Length'] = self.storlet_metadata['size']
+        #md['ETag'] = self.storlet_metadata['etag']
         self.gateway.storlet_metadata = md
         
         # Simulate Storlet request
@@ -62,42 +60,15 @@ class SDSGatewayStorlet():
 
         return app_iter
 
-    def execute_storlet(self, req_resp, storlet_list, storlet_md):
-        app_iter = None
-        storlet_executed = False
-        on_other_server = {}
+    def execute_storlet(self, req_resp, storlet_data, app_iter):
+        storlet = storlet_data['name']
+        params = storlet_data['params']        
+        self.storlet_name = storlet
+        self.storlet_metadata = storlet_data
+
+        self.logger.info('Crystal Filters - Go to execute ' + storlet +
+                         ' storlet with parameters "' + params + '"')
+                
+        app_iter = self.launch_storlet(req_resp, params, app_iter)
         
-        # Execute multiple Storlets, PIPELINE, if any.
-        for key in sorted(storlet_list):
-
-            storlet = storlet_list[key]["storlet"]
-            params = storlet_list[key]["params"]
-            server = storlet_list[key]["execution_server"]
-            storlet_id = storlet_list[key]["id"]
-
-            self.storlet_name = storlet
-            self.storlet_metadata = storlet_md[storlet]
-
-            if server == self.server:
-                self.logger.info('SDS Storlets - Go to execute ' + storlet +
-                                 ' storlet with parameters "' + params + '"')
-                        
-                app_iter = self.launch_storlet(req_resp, params, app_iter)
-                storlet_executed = True
-            else:
-                storlet_execution = {'storlet': storlet,
-                                     'params': params,
-                                     'execution_server': server,
-                                     'id': storlet_id}
-                on_other_server[key] = storlet_execution
-
-        if on_other_server:
-            req_resp.headers['SDS-IOSTACK'] = json.dumps(on_other_server)
-        
-        if storlet_executed:
-            if isinstance(req_resp, Request):
-                req_resp.environ['wsgi.input'] = app_iter
-            else:
-                req_resp.app_iter = app_iter
-        
-        return req_resp
+        return app_iter
