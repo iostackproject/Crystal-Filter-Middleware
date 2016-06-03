@@ -9,18 +9,18 @@ from swift.common.swob import Request
 
 class SDSGatewayStorlet():
 
-    def __init__(self, conf, logger, app, v, account, container, obj, method):
+    def __init__(self, conf, logger, request_data):
         self.conf = conf
         self.logger = logger
-        self.app = app
-        self.version = v
-        self.account = account
-        self.container = container
-        self.obj = obj
+        self.app = request_data['app']
+        self.version = request_data['api_version']
+        self.account = request_data['account']
+        self.container = request_data['container']
+        self.obj = request_data['object']
         self.gateway = None
         self.storlet_metadata = None
         self.storlet_name = None
-        self.method = method
+        self.method = request_data['method']
         self.server = self.conf['execution_server']
         self.gateway_method = None
 
@@ -62,7 +62,7 @@ class SDSGatewayStorlet():
 
     def execute_storlet(self, req_resp, storlet_data, app_iter):
         storlet = storlet_data['name']
-        params = storlet_data['params']        
+        params = storlet_data['params']
         self.storlet_name = storlet
         self.storlet_metadata = storlet_data
 

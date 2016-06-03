@@ -86,8 +86,7 @@ def write_metadata(fd, metadata, xattr_size=65536, md_key=None):
             raise
 
 
-def put_metadata(app, req, crystal_md):
-
+def put_metadata(app, req, crystal_md):    
     get_req = req.copy_get()
     get_resp = get_req.get_response(app)
 
@@ -95,11 +94,9 @@ def put_metadata(app, req, crystal_md):
     file_path = get_resp.app_iter._data_file.rsplit('/', 1)[0]
 
     for key in crystal_md["filter-exec-list"].keys():
-        
         cfilter = crystal_md["filter-exec-list"][key]
-        current_params = cfilter['params']
-        
-        if cfilter['has_reverse']:
+        if cfilter['type'] != 'global' and cfilter['has_reverse']:
+            current_params = cfilter['params']
             if current_params:
                 cfilter['params'] = current_params+','+'reverse=True'
             else:
@@ -120,7 +117,7 @@ def put_metadata(app, req, crystal_md):
     return True
 
 def get_metadata(orig_resp):
-    controller_md = {} 
+    controller_md = {}    
     try:
         fd = orig_resp.app_iter._fp
         controller_md = read_metadata(fd)

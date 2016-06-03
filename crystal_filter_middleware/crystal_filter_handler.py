@@ -71,7 +71,7 @@ class BaseSDSFilterHandler(object):
         
         self.method = self.request.method.lower()
         
-        self.redis_connection = redis.StrictRedis(self.redis_host, 
+        self.redis = redis.StrictRedis(self.redis_host, 
                                                   self.redis_port, 
                                                   self.redis_db)
         
@@ -162,8 +162,7 @@ class BaseSDSFilterHandler(object):
         Call gateway module to get result of filter execution
         in PUT flow
         """
-        return self.filter_control.execute_filters(self.request, filter_list,
-                                                   self.conf, self.logger, 
+        return self.filter_control.execute_filters(self.request, filter_list, 
                                                    self.app, self._api_version, 
                                                    self.account, self.container, 
                                                    self.obj, self.method)
@@ -173,8 +172,7 @@ class BaseSDSFilterHandler(object):
         Call gateway module to get result of filter execution
         in GET flow
         """
-        return self.filter_control.execute_filters(resp, filter_list,
-                                                   self.conf, self.logger, 
+        return self.filter_control.execute_filters(resp, filter_list, 
                                                    self.app, self._api_version, 
                                                    self.account, self.container, 
                                                    self.obj, self.method)
@@ -198,16 +196,18 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
                                                     filter_control)
 
         # Dynamic binding of policies
-        account_key_list = self.redis_connection.keys("pipeline:"+
+        account_key_list = self.redis.keys("pipeline:"+
                                                       str(self.account)+ 
                                                       "*")
 
+        self.global_filters = self.redis.hgetall('global_filters')
+        
         self.filter_list = None
         key = self.account + "/" + self.container + "/" + self.obj
         for target in range(3):
             self.target_key = key.rsplit("/", target)[0]
             if 'pipeline:' + self.target_key in account_key_list:
-                self.filter_list = self.redis_connection.hgetall(
+                self.filter_list = self.redis.hgetall(
                     'pipeline:' + self.target_key)
                 break
 
@@ -237,7 +237,7 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
         if filter_metadata['object_type']:
             obj_type = filter_metadata['object_type']
             correct_type = self._get_object_type() in \
-                self.redis_connection.lrange("object_type:"+obj_type, 0, -1)
+                self.redis.lrange("object_type:"+obj_type, 0, -1)
             
         if filter_metadata['object_size']:
             object_size = filter_metadata['object_size']
@@ -270,9 +270,22 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
     def _build_filter_execution_list(self):
         filter_execution_list = dict()
         
+        ''' Parse global filters '''
+        for key, filter_metadata in self.global_filters.items():
+            filter_metadata = json.loads(filter_metadata)
+            if filter_metadata["is_" + self.method]:
+                filter_main = filter_metadata["main"]
+                filter_type = 'global'
+                server = filter_metadata["execution_server"]
+                filter_execution = {'main': filter_main,
+                                    'execution_server': server,
+                                    'type': filter_type}
+                filter_execution_list[int(key)] = filter_execution
+        
+        ''' Parse filter list '''
         for _, filter_metadata in self.filter_list.items():            
             filter_metadata = json.loads(filter_metadata)
-
+  
             # Check conditions
             if filter_metadata["is_" + self.method]:
                 if self.check_size_type(filter_metadata):
@@ -300,7 +313,7 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
                    
                     launch_key = filter_metadata["execution_order"]
                     filter_execution_list[launch_key] = filter_execution
-
+        
         return filter_execution_list
 
     def GET(self):
@@ -308,8 +321,8 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
         GET handler on Proxy
         """    
         
-        if self.filter_list:
-            self.app.logger.info('Crystal Filters - ' + str(self.filter_list))
+        if self.global_filters or self.filter_list:
+            self.app.logger.info('Crystal Filters - There are Filters to execute')
             filter_exec_list = self._build_filter_execution_list()
             self.request.headers['CRYSTAL-FILTERS'] = json.dumps(filter_exec_list)
 
@@ -327,8 +340,8 @@ class SDSFilterProxyHandler(BaseSDSFilterHandler):
         """
         PUT handler on Proxy
         """
-        if self.filter_list:
-            self.app.logger.info('Crystal Filters - ' + str(self.filter_list))
+        if self.global_filters or self.filter_list:
+            self.app.logger.info('Crystal Filters - There are Filters to execute')
             filter_exec_list = self._build_filter_execution_list()
             if filter_exec_list:
                 self.request.headers['Filter-Executed-List'] = json.dumps(filter_exec_list)
@@ -418,20 +431,22 @@ class SDSFilterObjectHandler(BaseSDSFilterHandler):
         - Execute the storlets described in redis
         - Return the result
         """
+
         resp = self.request.get_response(self.app)
-        
-        iostack_md = sc.get_metadata(resp)
-        
-        if iostack_md:
-            resp.headers['ETag'] = iostack_md['original-etag']
-            resp.headers['Content-Length'] = iostack_md['original-size']
-        
-        filter_exec_list = self._augment_filter_execution_list(
-                                 iostack_md.get('filter-exec-list',None))
-        
-        if filter_exec_list:
-            return self.apply_filters_on_get(resp, filter_exec_list)
-        
+
+        if (resp.status_int == 200 or resp.status_int == 201):
+            iostack_md = sc.get_metadata(resp)
+            
+            if iostack_md:
+                resp.headers['ETag'] = iostack_md['original-etag']
+                resp.headers['Content-Length'] = iostack_md['original-size']
+            
+            filter_exec_list = self._augment_filter_execution_list(
+                                     iostack_md.get('filter-exec-list',None))
+            
+            if filter_exec_list:
+                return self.apply_filters_on_get(resp, filter_exec_list)
+            
         return resp
                
     def PUT(self):
